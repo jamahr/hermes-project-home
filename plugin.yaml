@@ -1,0 +1,10 @@
+name: project-home
+version: 0.1.0
+description: Project home for Hermes Desktop
+author: jamahr
+kind: standalone
+manifest_version: 2
+api_version: 1
+requires_hermes: ">=0.21.5"
+provides_tools: []
+provides_hooks: []

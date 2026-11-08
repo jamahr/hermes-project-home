@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.venv/
+screenshots/
+SPEC.md
+*browser-state*.json
+*login*.txt
+.env

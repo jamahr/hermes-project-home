@@ -1,0 +1,10 @@
+{
+  "name": "project-home",
+  "label": "Project Home",
+  "description": "Project files and context for Hermes Desktop",
+  "icon": "Folder",
+  "version": "0.1.0",
+  "tab": { "path": "/project-home", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
