@@ -26,6 +26,45 @@ def env(tmp_path, monkeypatch):
     with TestClient(app) as client:
         yield client, root, home, tmp_path
 
+def test_board_persists_in_profile_home(env):
+    c, _, home, _ = env
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, 'test')
+    assert c.get('/board').json() == {'version': 1, 'projects': {}}
+    assert c.put('/board/' + project.id, json={'status': 'Done', 'pinned': True}).status_code == 200
+    board = c.get('/board').json()
+    assert board['projects'][project.id]['status'] == 'Done'
+    assert board['projects'][project.id]['pinned'] is True
+    import json
+    assert json.loads((home / 'project-home' / 'board.json').read_text()) == board
+    assert c.put('/board/' + project.id, json={'status': 'invalid'}).status_code == 422
+    assert c.put('/board/missing', json={'status': 'Done'}).status_code == 404
+    other = home.parent / 'other-profile'
+    other.mkdir()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv('HERMES_HOME', str(other))
+        assert c.get('/board').json() == {'version': 1, 'projects': {}}
+    assert c.get('/board').json() == board
+
+
+def test_board_write_is_atomic_and_partial_updates_preserve_fields(env, monkeypatch):
+    c, _, home, _ = env
+    with projects_db.connect_closing() as conn:
+        project = projects_db.get_project(conn, 'test')
+    assert project is not None
+    url = '/board/' + project.id
+    assert c.put(url, json={'status': 'Backlog', 'pinned': True}).status_code == 200
+    original = (home / 'project-home' / 'board.json').read_bytes()
+    real_replace = api.os.replace
+    def fail_replace(*args, **kwargs):
+        raise OSError('simulated failure before rename')
+    monkeypatch.setattr(api.os, 'replace', fail_replace)
+    assert c.put(url, json={'status': 'Done'}).status_code == 409
+    assert (home / 'project-home' / 'board.json').read_bytes() == original
+    monkeypatch.setattr(api.os, 'replace', real_replace)
+    assert c.put(url, json={'status': 'Done'}).json()['projects'][project.id]['pinned'] is True
+
+
 def test_routes(env, monkeypatch):
     c, root, home, tmp = env
     assert c.get('/health').json()['ok']

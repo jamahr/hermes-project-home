@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 PLUGIN_ID = "project-home"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 router = APIRouter()
 
@@ -315,6 +315,53 @@ def scaffold_texts(name: str, description: str) -> dict[str, str]:
 def _project_dict(proj) -> dict:
     return {"id": proj.id, "slug": proj.slug, "name": proj.name, "description": proj.description,
             "primary_path": proj.primary_path, "archived": bool(proj.archived)}
+
+
+# Board writes are serialized across gateway workers as well as threads.
+import fcntl
+import json
+from typing import Literal
+
+BOARD_STATUSES = ("Backlog", "To Do", "In Progress", "Done")
+
+class BoardPatch(BaseModel):
+    status: Optional[Literal["Backlog", "To Do", "In Progress", "Done"]] = None
+    pinned: Optional[bool] = None
+
+
+def _read_board() -> dict:
+    path = _hermes_home() / "project-home" / "board.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != 1 or not isinstance(data.get("projects"), dict):
+            raise ValueError("invalid schema")
+        return data
+    except FileNotFoundError:
+        return {"version": 1, "projects": {}}
+    except (ValueError, OSError) as exc:
+        raise HTTPException(503, f"board unavailable: {exc}")
+
+
+@router.get("/board")
+def get_board() -> dict:
+    return _read_board()
+
+
+@router.put("/board/{project_id}")
+def update_board(project_id: str, body: BoardPatch) -> dict:
+    proj = _load_project(project_id)
+    directory = _hermes_home() / "project-home"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (directory / ".board.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        board = _read_board()
+        old = board["projects"].get(proj.id, {})
+        pinned = body.pinned if body.pinned is not None else old.get("pinned", False)
+        pinned_at = (old.get("pinned_at") or time.time()) if pinned else None
+        board["projects"][proj.id] = {"status": body.status or old.get("status", "To Do"), "pinned": pinned, "pinned_at": pinned_at}
+        with _directory(directory) as fd:
+            _atomic_write(fd, "board.json", json.dumps(board, ensure_ascii=False).encode())
+    return board
 
 
 # ── routes ───────────────────────────────────────────────────────────────────────────────────
