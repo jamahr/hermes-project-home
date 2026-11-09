@@ -2,9 +2,10 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const source = fs.readFileSync('desktop/plugin.js', 'utf8')
-test('project page uses a native new chat and contributes a composer picker', () => {
-  assert.match(source, /host\.newChat\(/)
-  assert.match(source, /session\.workspace\.move/)
+test('fresh drafts can open project chats with native controls', () => {
+  assert.match(source, /request\('session\.create'/)
+  assert.match(source, /host\.openSession\(.*stored_session_id/)
+  assert.doesNotMatch(source, /if \(!id\) return null/)
   assert.match(source, /COMPOSER_AREAS\.leading/)
   assert.doesNotMatch(source, /prompt\.submit/)
 })

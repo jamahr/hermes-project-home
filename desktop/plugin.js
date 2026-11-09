@@ -23,6 +23,14 @@ const request = async (method, params) => {
   if (result?.success === false || result?.ok === false || result?.error) throw new Error(result.message || result.error || 'Request failed')
   return result
 }
+async function openProjectChat(project) {
+  const epoch = gatewayActivationEpoch()
+  const profile = host.state.profile.get()
+  const result = await request('session.create', { cwd: project.primary_path, source: 'desktop', profile })
+  if (!result?.stored_session_id) throw new Error('Session creation returned no stored ID')
+  if (gatewayActivationEpoch() !== epoch) throw new Error('Connection changed while opening chat')
+  await host.openSession(result.stored_session_id)
+}
 function timeAgo(value) {
   if (!value) return ''
   const sec = Math.max(0, Math.floor((Date.now() - Number(value) * 1000) / 1000))
@@ -116,19 +124,7 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
   async function newChat() {
     if (busy || !root) return
     setBusy(true)
-    const before = host.state.focusedStoredSessionId.get(), epoch = gatewayActivationEpoch()
-    try {
-      host.newChat()
-      let id
-      for (let i = 0; i < 150; i++) {
-        if (gatewayActivationEpoch() !== epoch) throw new Error('Connection changed while opening chat')
-        id = host.state.focusedStoredSessionId.get()
-        if (id && id !== before && host.state.focusedSessionId.get()) break
-        await new Promise(resolve => setTimeout(resolve, 100))
-      }
-      if (!id || id === before || !host.state.focusedSessionId.get()) throw new Error('Could not open a fresh chat')
-      await request('session.workspace.move', { session_key: id, cwd: root })
-    } catch (e) { host.notify({ kind: 'error', message: `New chat: ${fail(e)}` }) } finally { setBusy(false) }
+    try { await openProjectChat(p) } catch (e) { host.notify({ kind: 'error', message: `New chat: ${fail(e)}` }) } finally { setBusy(false) }
   }
   async function jobAction(job, action) {
     try { await request('cron.manage', { action, name: job.job_id }); await cron.refetch() } catch (e) { setError(fail(e)) }
@@ -205,15 +201,16 @@ function ComposerProjectPicker({ pins }) {
   const last = p => Math.max(0, ...(activity.data?.[p.id] || []).map(s => Number(s.last_active || s.started_at || 0))) || Number(p.created_at || 0)
   const matches = projects.flatMap(p => [p.primary_path, ...(p.folders || [])].map(f => ({ p, path: (typeof f === 'string' ? f : f?.path || '').replace(/\/+$/, '') }))).filter(x => x.path && (cwd === x.path || cwd?.startsWith(x.path + '/'))).sort((a, b) => b.path.length - a.path.length)
   const selected = matches[0]?.p
-  if (!id) return null
   const sorted = [...projects].sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || last(b) - last(a))
   async function move(p) {
     const session_key = host.state.focusedStoredSessionId.get()
-    if (!session_key) return
-    try { await request('session.workspace.move', { session_key, cwd: p.primary_path }) }
-    catch (e) { host.notify({ kind: 'error', message: `Move project: ${fail(e)}` }) }
+    try {
+      const rows = session_key ? await request('session.list', { limit: 10000, profile: host.state.profile.get() }) : null
+      if (session_key && rows?.sessions?.some(s => s.id === session_key)) await request('session.workspace.move', { session_key, cwd: p.primary_path })
+      else await openProjectChat(p)
+    } catch (e) { host.notify({ kind: 'error', message: `Move project: ${fail(e)}` }) }
   }
-  return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
+  return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), !id && small('Starts a chat in this project; unsent draft text may be lost.', 'px-2 py-1'), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
 }
 export default {
   id: 'project-home', name: 'Project Home', version: '0.3.0', defaultEnabled: false,
