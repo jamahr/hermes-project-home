@@ -5,13 +5,13 @@ A Cowork-style project workspace: a stable **Projects** navigation item, a proje
 ## Features
 
 - Projects hub with search, creation, recent activity, and project shortcuts.
-- Project page with breadcrumbs, a native New chat button, recent conversations, and project notes.
+- Project page with breadcrumbs, a New session button, segmented recent chats and automated runs, and project notes.
 - Native composer project picker to move chats between project folders.
 - **Project notes:** a visible text area for objectives, considerations, and high-level direction—not a detailed/exhaustive plan or standing instructions. Explicit Save, saved/unsaved indicators, and conflict detection. Stored in `PROJECT_NOTES.md`.
 - **Instructions:** edit the effective project-root context file; ancestor sources are reported read-only.
-- **Context:** add text notes, or select/drop multiple files and folders into `context/`, preserving folder structure. Choose whether conflicts are renamed, replaced, or skipped; review per-file progress, cancel, and retry failures. The context browser groups folders and opens nested text files.
+- **Context:** add text notes, or select/drop multiple files and folders into `context/`, preserving folder structure. Choose whether conflicts are renamed, replaced, or skipped; review per-file progress, cancel, and retry failures. The context browser groups folders, previews text, and shows metadata for binary files.
 - **Memory:** view/edit `MEMORY.md`, with a preview on the project page.
-- **Scheduled:** create, pause/resume, and remove project-scoped tasks.
+- **Scheduled:** create, pause/resume, and remove project-scoped tasks with schedule, next-run, and state details.
 - Pin sessions in Hermes' native Pinned section. Pin projects as navigation shortcuts under Projects (the SDK cannot add projects to the native Pinned section).
 
 ## Install in the Mac app
