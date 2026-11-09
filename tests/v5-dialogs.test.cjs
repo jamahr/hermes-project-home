@@ -11,8 +11,8 @@ const pins = { has: () => false, get: () => ({}), subscribe: noop }
 const project = { id: 'p', name: 'Project', primary_path: '/tmp/project' }
 const sandbox = { ...sdk, jsx, jsxs: jsx, useState: v => [typeof v === 'function' ? v() : v, noop], useEffect: noop, useRef: v => ({ current:v }), useQuery: () => ({data: {}, refetch: noop}), useQueryClient: () => ({invalidateQueries: noop}), useValue: () => '', gatewayActivationEpoch: () => 0, useGatewayActivationEpoch: () => 0, host: {state: {profile:{get:()=>''}}, request: noop}, window: {location:{hash:''}}, URLSearchParams, encodeURIComponent, Map, Set, Date, Error, String, Math, Object, Array }
 vm.createContext(sandbox)
-vm.runInContext(source + '\nthis.components = { CreateProject, Rename, FileEditor, ContextAdd, ContextView, CronAdd, ComposerProjectPicker, Hub, Project, Modal, ScheduledRow }', sandbox)
-for (const [name, Component] of Object.entries(sandbox.components)) {
+vm.runInContext(source + '\nthis.components = { CreateProject, Rename, FileEditor, ContextAdd, ContextView, CronAdd, ComposerProjectPicker, Hub, Project, Modal, ScheduledRow, preview }', sandbox)
+for (const [name, Component] of Object.entries(sandbox.components).filter(([name]) => name !== 'preview')) {
   test(`${name} renders without throwing`, () => {
     assert.doesNotThrow(() => Component({ ctx, project: name === 'Rename' || name === 'Project' ? project : 'p', projects: [project], pins, changePin: noop, close: noop, done: noop, created: noop, job: {job_id:'j'}, action: noop, remove: noop, name: 'test.txt', title: 'Archive project?' }))
   })
@@ -45,7 +45,7 @@ test('text and binary viewers render appropriately', () => {
   assert.match(binary, /Preview isn't available/); assert.match(binary, /context\/docs\/a.pdf/); assert.match(binary, /2.0 KB/)
 })
 test('scheduled row and confirm dialog render', () => {
-  const row = sandbox.components.ScheduledRow({job:{name:'Job',schedule_display:'Daily',enabled:false},action:noop,remove:noop})
+  const row = sandbox.components.ScheduledRow({job:{name:'Job',schedule_display:'Daily',state:"paused",enabled:false},action:noop,remove:noop})
   assert.match(flatten(row), /Daily/); assert.match(flatten(row), /Paused/); assert.match(flatten(row), /Resume/)
   let i=0; sandbox.useState = v => [i++ === 8 ? {job_id:'j',name:'Job'} : (typeof v === 'function' ? v() : v), noop]
   const page = sandbox.components.Project({ctx,project,projects:[project],pins,changePin:noop})
@@ -60,9 +60,25 @@ test('empty states describe context and memory', () => {
 
 test('cron dialog labels and presets are visible', () => { const text = flatten(sandbox.components.CronAdd({ctx,project:'p',close:noop,done:noop})); assert.match(text, /What should the agent do\?/); assert.match(text, /Every weekday 9am/); assert.match(text, /When/); })
 
-test('expired one-shot tasks cannot resume', () => {
-  const text = flatten(sandbox.components.ScheduledRow({job:{name:'Old',schedule:{kind:'once',run_at:'2020-01-01T09:00:00Z'},enabled:false},action:noop,remove:noop}))
-  assert.match(text, /Expired/); assert.match(text, /Remove/); assert.doesNotMatch(text, /Resume/)
+test('scheduled states use real cron state and run details', () => {
+  const render = job => flatten(sandbox.components.ScheduledRow({job, action:noop, remove:noop}))
+  const completed = render({name:'Done', state:'completed', enabled:false, schedule:'once at 2026-11-06 18:25', repeat:'1/1', last_run_at:'2026-11-06T19:19:00', last_status:'ok'})
+  assert.match(completed, /Completed/); assert.match(completed, /Once ·/); assert.match(completed, /Ran .* · ok/); assert.doesNotMatch(completed, /Resume|Pause/)
+  const active = render({state:'active', enabled:true, schedule:'0 10 * * *', next_run_at:'2026-11-10T10:00:00'})
+  assert.match(active, /Active/); assert.match(active, /cron 0 10/); assert.match(active, /Next /); assert.match(active, /Pause/)
+  const paused = render({state:'paused', enabled:false, schedule:'every hour'}); assert.match(paused, /Paused/); assert.match(paused, /Resume/)
+  assert.match(render({state:'completed',last_delivery_error:'offline'}), /Ran, but not delivered/)
+  assert.match(render({state:'completed',last_error:'broken'}), /Failed: broken/)
+})
+test('preview strips markdown before clamping', () => {
+  const view = sandbox.components.preview('# Heading\n> **Bold** __text__ `code`\n- item')
+  assert.equal(flatten(view), 'Heading\nBold text code\nitem'); assert.equal(view.props.style.WebkitLineClamp, 4)
+})
+test('nested upload paths show relative directory separator and sizes', () => {
+  let index = 0
+  sandbox.useState = v => { const i = index++; return [i === 2 ? [{path:'docs/Finance/model.xlsx',file:{size:2048},status:'pending'}, {path:'docs/large.bin',file:{size:11953766},status:'skipped'}] : (typeof v === 'function' ? v() : v), noop] }
+  const view = sandbox.components.ContextAdd({ctx,project:'p',close:noop,done:noop}), text = flatten(view)
+  assert.match(text, /Finance\/.*·.*model.xlsx/);  assert.match(text, /2.0 KB/); assert.match(text, /1 of 2 will upload/); assert.match(text, /1 too large/)
 })
 test('upload dialog has destination, accessible remove and neutral footer', () => {
   let index = 0
