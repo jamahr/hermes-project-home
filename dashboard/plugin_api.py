@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 PLUGIN_ID = "project-home"
-VERSION = "0.2.0"
+VERSION = "0.4.0"
 
 router = APIRouter()
 
@@ -45,7 +45,7 @@ CONTEXT_DIR = "context"
 
 MAX_TEXT_BYTES = 1024 * 1024          # read/write cap for text files
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # context upload cap
-MAX_CONTEXT_ENTRIES = 500
+MAX_CONTEXT_ENTRIES = 2000
 MAX_TITLE = 120
 MAX_NAME = 120
 MAX_CRON_FIELD = 4000
@@ -116,6 +116,39 @@ def _check_segment(name: str) -> str:
     if not _SAFE_NAME_RE.match(name) or name in {".", ".."} or name.startswith("."):
         raise HTTPException(400, "invalid file name")
     return name
+
+
+def _context_path(path: str) -> list[str]:
+    if not path or len(path) > 512:
+        raise HTTPException(400, "invalid path")
+    parts = path.split("/")
+    if len(parts) > 8:
+        raise HTTPException(400, "path too deep")
+    if any(not _SAFE_NAME_RE.fullmatch(part) for part in parts):
+        raise HTTPException(400, "invalid path")
+    return [_check_segment(part) for part in parts]
+
+
+@contextmanager
+def _subdirectory(fd: int, parts: list[str], create: bool = False):
+    current = os.dup(fd)
+    try:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=current)
+                except FileExistsError:
+                    pass
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            os.close(current)
+            current = nxt
+        yield current
+    except FileNotFoundError:
+        raise HTTPException(404, "folder not found")
+    except OSError as exc:
+        raise HTTPException(409, f"unsafe or inaccessible folder: {exc.strerror}")
+    finally:
+        os.close(current)
 
 
 def confined(root: Path, *parts: str) -> Path:
@@ -430,33 +463,49 @@ def write_file(body: FileBody, project: str = Query(...), name: str = Query(...)
 def list_context(project: str = Query(...)) -> dict:
     root = _project_root(_load_project(project))
     files = []
+    truncated = False
+    def walk(fd, prefix="", depth=0):
+        nonlocal truncated
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+                relative = prefix + entry.name
+                try:
+                    _context_path(relative)
+                    if entry.is_dir(follow_symlinks=False) and depth < 7:
+                        with _subdirectory(fd, [entry.name]) as child:
+                            walk(child, relative + "/", depth + 1)
+                    elif entry.is_file(follow_symlinks=False):
+                        if len(files) >= MAX_CONTEXT_ENTRIES:
+                            truncated = True
+                            return
+                        st = entry.stat(follow_symlinks=False)
+                        files.append({"name": entry.name, "path": relative, "size": st.st_size, "mtime": st.st_mtime, "text": Path(entry.name).suffix.lower() in _TEXT_EXTS})
+                except (HTTPException, OSError):
+                    continue
+                if truncated:
+                    return
     try:
         with _directory(root, context=True) as fd:
-            with os.scandir(fd) as entries:
-                for entry in entries:
-                    if entry.name.startswith(".") or not entry.is_file(follow_symlinks=False):
-                        continue
-                    st = entry.stat(follow_symlinks=False)
-                    files.append({"name": entry.name, "size": st.st_size, "mtime": st.st_mtime, "text": Path(entry.name).suffix.lower() in _TEXT_EXTS})
-                    if len(files) >= MAX_CONTEXT_ENTRIES:
-                        break
+            walk(fd)
     except HTTPException as exc:
         if exc.status_code != 404:
             raise
-        return {"dir": str(root / CONTEXT_DIR), "exists": False, "files": []}
-    files.sort(key=lambda f: f["name"].lower())
-    return {"dir": str(root / CONTEXT_DIR), "exists": True, "files": files}
+        return {"dir": str(root / CONTEXT_DIR), "exists": False, "files": [], "truncated": False}
+    files.sort(key=lambda f: f["path"].lower())
+    return {"dir": str(root / CONTEXT_DIR), "exists": True, "files": files, "truncated": truncated}
 
 
 @router.get("/context/file")
-def read_context(project: str = Query(...), name: str = Query(...)) -> dict:
+def read_context(project: str = Query(...), name: Optional[str] = None, path: Optional[str] = None) -> dict:
     root = _project_root(_load_project(project))
-    fname = _check_segment(name)
-    with _directory(root, context=True) as fd:
-        result = _read_text(fd, fname)
+    parts = _context_path(path if path is not None else name or "")
+    with _directory(root, context=True) as fd, _subdirectory(fd, parts[:-1]) as parent:
+        result = _read_text(parent, parts[-1])
         if not result["exists"]:
             raise HTTPException(404, "file not found")
-        return {"name": fname, **result}
+        return {"name": parts[-1], "path": "/".join(parts), **result}
 
 
 class NoteBody(BaseModel):
@@ -467,7 +516,8 @@ class NoteBody(BaseModel):
 
 def _create_unique(fd: int, stem: str, suffix: str, data: bytes) -> str:
     for i in range(1, 1000):
-        name = f"{stem}{suffix}" if i == 1 else f"{stem}-{i}{suffix}"
+        tag = "" if i == 1 else f"-{i}"
+        name = f"{stem[:MAX_NAME - len(suffix) - len(tag)]}{tag}{suffix}"
         try:
             _atomic_write(fd, name, data, exclusive=True)
             return name
@@ -493,14 +543,15 @@ def add_context_note(body: NoteBody) -> dict:
 
 
 @router.post("/context/upload")
-async def upload_context(request: Request, project: str = Query(...)) -> dict:
+async def upload_context(request: Request, project: str = Query(...), path: Optional[str] = None, on_conflict: Literal["rename", "overwrite", "skip"] = "rename") -> dict:
     root = _project_root(_load_project(project))
+    parts = _context_path(path) if path is not None else None
     # Consume a strictly bounded body before multipart parsing, regardless of Content-Length.
     chunks = []
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
-        if size > MAX_UPLOAD_BYTES:
+        if size > MAX_UPLOAD_BYTES + min(65536, MAX_UPLOAD_BYTES // 10):
             raise HTTPException(413, "request too large (10 MiB max)")
         chunks.append(chunk)
     request._body = b"".join(chunks)
@@ -515,9 +566,22 @@ async def upload_context(request: Request, project: str = Query(...)) -> dict:
         safe_suffix = re.sub(r"[^A-Za-z0-9.]+", "", suffix)[:12]
         _check_segment(safe_stem + safe_suffix)
         data = await upload.read(MAX_UPLOAD_BYTES + 1)
-        with _directory(root, context=True, create=True) as fd:
-            name = _create_unique(fd, safe_stem, safe_suffix, data)
-        return {"ok": True, "name": name, "size": len(data)}
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "file too large")
+        parts = parts or [safe_stem + safe_suffix]
+        with _directory(root, context=True, create=True) as fd, _subdirectory(fd, parts[:-1], create=True) as parent:
+            name = parts[-1]
+            existing = _stat(parent, name)
+            if on_conflict == "skip" and existing:
+                status = "skipped"
+            elif on_conflict == "rename":
+                stem, suffix = os.path.splitext(name)
+                name = _create_unique(parent, stem, suffix, data)
+                status = "created" if name == parts[-1] else "renamed"
+            else:
+                _atomic_write(parent, name, data, exclusive=not bool(existing))
+                status = "overwritten" if existing else "created"
+        return {"ok": True, "name": name, "path": "/".join(parts[:-1] + [name]), "size": len(data), "status": status}
     finally:
         await form.close()
 

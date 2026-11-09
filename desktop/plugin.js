@@ -1,5 +1,5 @@
 import { host, COMPOSER_AREAS, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, Button, Input, Textarea, Dialog, DialogContent, DialogHeader, DialogTitle, Codicon, EmptyState, useQuery, useQueryClient, useValue, gatewayActivationEpoch, useGatewayActivationEpoch } from '@hermes/plugin-sdk'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const BASE = '/projects-home'
@@ -135,7 +135,7 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
       jsxs('main', { children: [button(busy ? 'Opening…' : 'New chat', newChat, { variant: 'default', disabled: busy || !root }), small("Opens a chat in this project's folder", 'mt-2'), error && small(error, 'mt-4'), jsxs('div', { className: 'mt-4', children: [small('Recents', 'mb-3'), button(`${showAutomated ? 'Hide' : 'Show'} automated runs (${automatedCount})`, () => setShowAutomated(!showAutomated)), searchOpen && field(search, setSearch, 'Search recents'), sessions.isLoading ? small('Loading sessions…') : sessions.error ? jsxs('div', { children: [small(`Could not load sessions: ${fail(sessions.error)}`), button('Retry', () => sessions.refetch())] }) : !visible.length ? small(search ? 'No matching sessions.' : 'No recent sessions.') : (showAll ? visible : visible.slice(0, 10)).map(s => { const sid = s._lineage_root_id || s.id; const pinned = pinOverrides[sid] ?? pinQuery.data?.pinned?.[sid] ?? false; return jsxs('div', { className: `group flex items-center gap-3 border-b ${border} py-3`, children: [jsx('button', { className: 'min-w-0 flex-1 truncate text-left', onClick: () => void host.openSession(sid), children: s.title || s.preview || 'Untitled session' }), small(timeAgo(s.last_active || s.started_at)), button(icon(pinned ? 'pinned' : 'pin'), () => { if (!host.sessions?.pin) { setError('Session pinning requires a newer Desktop SDK.'); return } host.sessions.pin(sid, !pinned); setPinOverrides(v => ({ ...v, [sid]: !pinned })) }, { 'aria-label': pinned ? 'Unpin session' : 'Pin session', className: 'opacity-0 group-hover:opacity-100 focus:opacity-100' })] }, s.id) }), visible.length > 10 && button(showAll ? 'Show less' : 'Show all', () => setShowAll(!showAll))] })] }),
       jsxs('aside', { children: [jsx(ProjectNotes, { ctx, project: p.id, refreshInstructions: () => qc.invalidateQueries({ queryKey: prefix }) }), info.data?.instructions_message && small(`${info.data.instructions_message} ${(info.data.ancestor_instruction_sources || []).join(', ')}`, 'mb-3'), info.error && jsx(Message, { title: 'Plugin backend unavailable', description: 'Enable the project-home backend for this profile and restart the gateway.' }),
         jsx(SideRow, { iconName: 'note', label: 'Instructions', action: 'Edit', onClick: () => setDialog('instructions'), children: instructions.isLoading ? small('Loading…') : instructions.error ? small(fail(instructions.error)) : instructions.data?.content ? preview(instructions.data.content) : small('No instructions yet.') }),
-        jsx(SideRow, { iconName: 'files', label: 'Context', action: 'Add', onClick: () => setDialog('context-add'), children: contexts.isLoading ? small('Loading…') : contexts.error ? small(fail(contexts.error)) : (contexts.data?.files || []).length ? contexts.data.files.map(f => jsx('button', { className: `block w-full truncate py-1 text-left text-xs ${muted}`, onClick: () => setDialog(`context:${f.name}`), children: `${f.name} · ${f.size} B` }, f.name)) : small('No context files.') }),
+        jsx(SideRow, { iconName: 'files', label: 'Context', action: 'Add', onClick: () => setDialog('context-add'), children: contexts.isLoading ? small('Loading…') : contexts.error ? small(fail(contexts.error)) : (contexts.data?.files || []).length ? jsx(ContextFiles, { files: contexts.data.files, truncated: contexts.data.truncated, open: path => setDialog(`context:${path}`) }) : small('No context files.') }),
         jsx(SideRow, { iconName: 'book', label: 'Memory', action: 'View', onClick: () => setDialog('memory'), children: memory.isLoading ? small('Loading…') : memory.error ? small(fail(memory.error)) : memoryPreview ? preview(memoryPreview) : small('No memory yet.') }),
         jsx(SideRow, { iconName: 'clock', label: 'Scheduled', action: 'Add', onClick: () => setDialog('cron-add'), children: cron.isLoading ? small('Loading…') : cron.error ? small(fail(cron.error)) : jobs.length ? jobs.map(j => jsxs('div', { className: 'py-2 text-xs', children: [jsx('div', { children: j.name || j.job_id }), jsxs('div', { className: 'flex gap-2', children: [button(j.enabled === false ? 'Resume' : 'Pause', () => jobAction(j, j.enabled === false ? 'resume' : 'pause')), button('Remove', () => { if (window.confirm(`Remove scheduled job ${j.name || j.job_id}?`)) void jobAction(j, 'remove') })] })] }, j.job_id)) : small('No scheduled jobs.') }), small(p.primary_path || 'No project folder', 'mt-8 break-all') ] })
     ] })] }),
@@ -146,6 +146,14 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
     dialog === 'rename' && jsx(Rename, { project: p, close: () => setDialog(''), done: () => qc.invalidateQueries({ queryKey: ['project-home'] }) }),
     dialog === 'archive' && jsx(Modal, { title: 'Archive project?', close: () => setDialog(''), children: jsxs('div', { children: [small('The folder and its files will not be deleted.'), button('Archive', async () => { try { await request('projects.archive', { id: p.id }); await qc.invalidateQueries({ queryKey: ['project-home'] }); go() } catch (e) { setError(fail(e)); setDialog('') } })] }) })
   ] })
+}
+function ContextFiles({ files, truncated, open }) {
+  const [all, setAll] = useState(false)
+  const shown = all ? files : files.slice(0, 10)
+  const groups = new Map()
+  for (const f of shown) { const path = f.path || f.name; const group = path.includes('/') ? path.split('/')[0] : ''; if (!groups.has(group)) groups.set(group, []); groups.get(group).push(f) }
+  const row = f => jsx('button', { className: `block w-full truncate py-1 text-left text-xs ${muted}`, onClick: () => open(f.path || f.name), children: `${f.path || f.name} · ${f.size} B` }, f.path || f.name)
+  return jsxs('div', { children: [ ...(groups.get('') || []).map(row), ...Array.from(groups.entries()).filter(([name]) => name).map(([name, list]) => jsxs('details', { children: [jsx('summary', { children: `${name} (${files.filter(f => (f.path || f.name).startsWith(name + '/')).length})` }), ...list.map(row)] }, name)), files.length > 10 && button(all ? 'Show less' : `Show all (${files.length})`, () => setAll(!all)), truncated && small('Listing truncated at 2000 files.')] })
 }
 function ProjectNotes({ ctx, project, refreshInstructions }) {
   const [text, setText] = useState(''), [saved, setSaved] = useState(''), [mtime, setMtime] = useState(null), [exists, setExists] = useState(false), [loading, setLoading] = useState(true), [loadFailed, setLoadFailed] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState('')
@@ -168,14 +176,85 @@ function FileEditor({ ctx, project, name, close, done }) {
   async function save() { setBusy(true); setError(''); try { await ctx.rest('/file' + query(project, name), { method: 'PUT', body: { content, expected_mtime: mtime, expected_exists: exists } }); await done(); close() } catch (e) { setError(fail(e)) } finally { setBusy(false) } }
   return jsx(Modal, { title: name, close, children: jsxs('div', { className: 'flex flex-col gap-3', children: [loading ? small('Loading…') : area(content, setContent, '', { rows: 16 }), error && small(error), button(busy ? 'Saving…' : 'Save', save, { variant: 'default', disabled: busy || loading || (mtime === null && !!error) })] }) })
 }
-function ContextAdd({ ctx, project, close, done }) {
-  const [title, setTitle] = useState(''), [body, setBody] = useState(''), [file, setFile] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('')
-  async function submit() { setBusy(true); setError(''); try { if (file) await ctx.rest('/context/upload' + query(project), { method: 'POST', upload: { filename: file.name, contentType: file.type || 'application/octet-stream', bytes: await file.arrayBuffer() } }); else await ctx.rest('/context', { method: 'POST', body: { project, title: title.trim(), body } }); await done(); close() } catch (e) { setError(fail(e)) } finally { setBusy(false) } }
-  return jsx(Modal, { title: 'Add context', close, children: jsxs('div', { className: 'flex flex-col gap-3', children: [field(title, setTitle, 'Note title'), area(body, setBody, 'Note text', { rows: 8 }), small('Or upload a file (up to 10 MiB):'), jsx('input', { type: 'file', onChange: e => setFile(e.target.files?.[0] || null) }), error && small(error), button(busy ? 'Adding…' : file ? 'Upload' : 'Add note', submit, { disabled: busy || (!file && !title.trim()) })] }) })
+// v4 upload helpers
+const UPLOAD_LIMIT = 10 * 1024 * 1024
+const BATCH_BYTES = 500 * 1024 * 1024
+const isJunk = path => path.split('/').some(part => ['.ds_store', 'thumbs.db', 'desktop.ini', '__macosx', '.git'].includes(part.toLowerCase()))
+async function collectEntries(entries) {
+  const found = []
+  async function visit(entry, prefix = '') {
+    const path = prefix + entry.name
+    if (isJunk(path)) { found.push({ path, junk: true }); return }
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject))
+      found.push({ path, file })
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      for (;;) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject))
+        if (!batch.length) break
+        for (const child of batch) await visit(child, path + '/')
+      }
+    }
+  }
+  for (const entry of entries) if (entry) await visit(entry)
+  return found
 }
+function prepareBatch(entries) {
+  let junk = 0, bytes = 0
+  const items = []
+  for (const item of entries) {
+    if (item.junk || isJunk(item.path)) { junk++; continue }
+    bytes += item.file.size
+    items.push({ ...item, status: item.status || (item.file.size > UPLOAD_LIMIT ? 'skipped' : 'pending'), reason: item.reason || (item.file.size > UPLOAD_LIMIT ? 'Exceeds 10 MiB' : '') })
+  }
+  if (items.length > 1000 || bytes > BATCH_BYTES) throw new Error('Batch limit is 1000 files and 500 MiB.')
+  return { items, junk, bytes }
+}
+async function uploadBatch(ctx, project, items, policy, cancelled, update) {
+  for (const item of items) {
+    if (cancelled()) break
+    if (!['pending', 'failed'].includes(item.status)) continue
+    item.status = 'uploading'; item.reason = ''; update()
+    try {
+      const url = `/context/upload?project=${encodeURIComponent(project)}&path=${encodeURIComponent(item.path)}&on_conflict=${encodeURIComponent(policy)}`
+      const result = await ctx.rest(url, { method: 'POST', upload: { filename: item.file.name, contentType: item.file.type || 'application/octet-stream', bytes: await item.file.arrayBuffer() } })
+      item.status = result.status; item.reason = result.path !== item.path ? `Saved as ${result.path}` : ''
+    } catch (e) { item.status = 'failed'; item.reason = e instanceof Error ? e.message : String(e) }
+    update()
+  }
+}
+// end v4 upload helpers
+function ContextAdd({ ctx, project, close, done }) {
+  const [title, setTitle] = useState(''), [body, setBody] = useState(''), [items, setItems] = useState([]), [junk, setJunk] = useState(0), [policy, setPolicy] = useState('rename'), [busy, setBusy] = useState(false), [error, setError] = useState(''), [finished, setFinished] = useState(false)
+  const cancelled = useRef(false)
+  async function add(entries) {
+    try { const batch = prepareBatch([...items, ...entries]); setItems(batch.items); setJunk(junk + batch.junk); setError(''); setFinished(false) } catch (e) { setError(fail(e)) }
+  }
+  async function drop(e) {
+    e.preventDefault()
+    try {
+      const dt = e.dataTransfer
+      const entries = Array.from(dt.items || []).map(i => i.webkitGetAsEntry?.()).filter(Boolean)
+      await add(entries.length ? await collectEntries(entries) : Array.from(dt.files || []).map(file => ({ file, path: file.webkitRelativePath || file.name })))
+    } catch (e) { setError(fail(e)) }
+  }
+  async function note() { setBusy(true); setError(''); try { await ctx.rest('/context', { method: 'POST', body: { project, title: title.trim(), body } }); await done(); close() } catch (e) { setError(fail(e)) } finally { setBusy(false) } }
+  async function upload(retry = false) {
+    if (busy) return
+    setBusy(true); setError(''); cancelled.current = false
+    const batch = items.map(i => ({ ...i }))
+    try { await uploadBatch(ctx, project, retry ? batch.filter(i => i.status === 'failed') : batch, policy, () => cancelled.current, () => setItems([...batch])); await done(); setFinished(true) } catch (e) { setError(fail(e)) } finally { setBusy(false) }
+  }
+  const counts = Object.fromEntries(['created', 'renamed', 'overwritten', 'skipped', 'failed'].map(x => [x, items.filter(i => i.status === x).length]))
+  const complete = items.filter(i => !['pending', 'uploading'].includes(i.status)).length
+  const input = folder => jsx('input', { type: 'file', multiple: true, ref: folder ? el => { if (el) el.setAttribute('webkitdirectory', '') } : undefined, disabled: busy, onChange: e => { void add(Array.from(e.target.files || []).map(file => ({ file, path: file.webkitRelativePath || file.name }))); e.target.value = '' } })
+  return jsx(Modal, { title: 'Add context', close: () => { if (!busy) close() }, children: jsxs('div', { className: 'flex flex-col gap-3 max-h-[75vh] overflow-auto', children: [field(title, setTitle, 'Note title'), area(body, setBody, 'Note text', { rows: 4 }), button('Add note', note, { disabled: busy || !title.trim() }), jsx('label', { children: ['Choose files ', input(false)] }), jsx('label', { children: ['Choose folder ', input(true)] }), jsx('div', { onDragOver: e => e.preventDefault(), onDrop: busy ? e => e.preventDefault() : drop, className: `rounded border ${border} p-4`, children: 'Drop files or folders here' }), small('OS junk is skipped. Files over 10 MiB are skipped. Maximum 1000 files / 500 MiB.'), junk > 0 && small(`${junk} OS junk entries skipped.`), small(`${items.length} files · ${items.reduce((n, i) => n + i.file.size, 0)} B`), jsx('select', { value: policy, disabled: busy, onChange: e => setPolicy(e.target.value), children: [jsx('option', { value: 'rename', children: 'Keep both' }), jsx('option', { value: 'overwrite', children: 'Replace' }), jsx('option', { value: 'skip', children: 'Skip' })] }), jsx('div', { className: 'max-h-48 overflow-auto', children: items.map((i, n) => small(`${i.path} · ${i.file.size} B · ${i.status}${i.reason ? ': ' + i.reason : ''}`, 'break-all', n)) }), jsx('progress', { value: complete, max: items.length || 1 }), small(`${complete} of ${items.length}`), finished && small(`Created ${counts.created} · Renamed ${counts.renamed} · Replaced ${counts.overwritten} · Skipped ${counts.skipped} · Failed ${counts.failed}${cancelled.current ? ' · Cancelled' : ''}`), error && small(error), busy ? button('Cancel', () => { cancelled.current = true }) : jsxs('div', { children: [button('Upload', () => upload(false), { disabled: !items.some(i => i.status === 'pending') }), counts.failed > 0 && button('Retry failed', () => upload(true)), button('Clear list', () => { setItems([]); setJunk(0); setFinished(false) })] })] }) })
+}
+
 function ContextView({ ctx, project, name, close }) {
   const epoch = useGatewayActivationEpoch()
-  const data = useQuery({ queryKey: ['project-home', epoch, project, 'context-file', name], queryFn: () => ctx.rest('/context/file' + query(project, name)) })
+  const data = useQuery({ queryKey: ['project-home', epoch, project, 'context-file', name], queryFn: () => ctx.rest('/context/file' + query(project) + '&path=' + enc(name)) })
   return jsx(Modal, { title: name, close, children: data.isLoading ? small('Loading…') : data.error ? small(fail(data.error)) : jsx('pre', { className: 'max-h-96 overflow-auto whitespace-pre-wrap break-all text-sm', children: data.data?.content || '(empty)' }) })
 }
 function CronAdd({ ctx, project, close, done }) {
@@ -213,7 +292,7 @@ function ComposerProjectPicker({ pins }) {
   return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), !id && small('Starts a chat in this project; unsent draft text may be lost.', 'px-2 py-1'), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
 }
 export default {
-  id: 'project-home', name: 'Project Home', version: '0.3.0', defaultEnabled: false,
+  id: 'project-home', name: 'Project Home', version: '0.4.0', defaultEnabled: false,
   register(ctx) {
     let board = {}, disposers = [], listeners = new Set(), known = [], retired = false, generation = 0
     const storageKey = () => `pinned-projects:${host.state.connectionId?.get() || 'local'}:${host.state.profile.get() || 'default'}`

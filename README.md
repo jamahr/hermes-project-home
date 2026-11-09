@@ -9,7 +9,7 @@ A Cowork-style project workspace: a stable **Projects** navigation item, a proje
 - Native composer project picker to move chats between project folders.
 - **Project notes:** a visible text area for objectives, considerations, and high-level direction—not a detailed/exhaustive plan or standing instructions. Explicit Save, saved/unsaved indicators, and conflict detection. Stored in `PROJECT_NOTES.md`.
 - **Instructions:** edit the effective project-root context file; ancestor sources are reported read-only.
-- **Context:** add text notes or upload reference files into `context/`.
+- **Context:** add text notes, or select/drop multiple files and folders into `context/`, preserving folder structure. Choose whether conflicts are renamed, replaced, or skipped; review per-file progress, cancel, and retry failures. The context browser groups folders and opens nested text files.
 - **Memory:** view/edit `MEMORY.md`, with a preview on the project page.
 - **Scheduled:** create, pause/resume, and remove project-scoped tasks.
 - Pin sessions in Hermes' native Pinned section. Pin projects as navigation shortcuts under Projects (the SDK cannot add projects to the native Pinned section).
@@ -49,13 +49,13 @@ File operations use no-follow directory handles and descriptor-relative reads/wr
 - Project shortcuts are separate navigation rows, not entries inside native Pinned.
 - The SDK exposes session pin mutation but no reactive pin-state reader. Pins changed elsewhere may show stale state on the project page; native Pinned remains authoritative.
 - The file-browser action opens the existing files pane without changing its working directory.
-- The 10 MiB upload cap includes multipart overhead. OAuth-remote uploads depend on the core transport and may be unavailable; SSH is the target.
+- Uploads are limited to 10 MiB per file and 1000 files / 500 MiB per batch. OAuth-remote uploads depend on the core transport and may be unavailable; SSH is the target.
 - Reload can return the app to its default route; reopen Projects. Notes persist independently of navigation.
 - The browser-rendered desktop interface was exercised on Linux. Native Mac installation still needs a user-side check.
 
 ## Verification
 
-Backend tests cover file/context routes, folder confinement, no-follow operations, upload bounds, existence/mtime conflicts, instruction discovery, and notes activation. Latest run: **11 passed**.
+Backend tests cover file/context routes, folder confinement, no-follow operations, upload bounds, existence/mtime conflicts, instruction discovery, and notes activation. See `tests/test_v4.py` for nested paths, conflict policies, confinement, and recursive listings; `tests/v4-upload.test.cjs` checks the upload workflow against a mocked transport. The v0.4 backend requires a gateway reload before live use.
 
 Live renderer checks covered project creation; Instructions, Context, and Memory edits; scheduled-task creation/removal; starting a session with a real response; Recents; project/session pinning; notes persistence across reload; and a new session correctly reading the saved objective. Test projects/sessions were archived and temporary folders/tasks removed.
 
