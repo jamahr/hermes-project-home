@@ -1,0 +1,10 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const source = fs.readFileSync('desktop/plugin.js', 'utf8')
+test('project page uses a native new chat and contributes a composer picker', () => {
+  assert.match(source, /host\.newChat\(/)
+  assert.match(source, /session\.workspace\.move/)
+  assert.match(source, /COMPOSER_AREAS\.leading/)
+  assert.doesNotMatch(source, /prompt\.submit/)
+})

@@ -5,7 +5,8 @@ A Cowork-style project workspace: a stable **Projects** navigation item, a proje
 ## Features
 
 - Projects hub with search, creation, recent activity, and project shortcuts.
-- Project page with breadcrumbs, a new-session composer, recent conversations, and project notes.
+- Project page with breadcrumbs, a native New chat button, recent conversations, and project notes.
+- Native composer project picker to move chats between project folders.
 - **Project notes:** a visible text area for objectives, considerations, and high-level direction—not a detailed/exhaustive plan or standing instructions. Explicit Save, saved/unsaved indicators, and conflict detection. Stored in `PROJECT_NOTES.md`.
 - **Instructions:** edit the effective project-root context file; ancestor sources are reported read-only.
 - **Context:** add text notes or upload reference files into `context/`.
@@ -26,6 +27,10 @@ Connect Hermes Desktop to your backend and select the intended profile.
 For a fresh backend, also select the Agent plugin target and enable it for the intended profile. The Python backend must be enabled before its API can execute. Desktop files are installed on the Mac; project folders and the backend run on the connected server. Installing the backend on a VPS alone does not install the Mac UI.
 
 Tested against Hermes Desktop renderer v0.22.7. Uses the current SDK's `host.openSession`, `host.sessions.pin`, `useGatewayActivationEpoch`, and plugin REST transport; older versions may require an update.
+
+## Updating
+
+Use **Capabilities → Plugins → Update** on Project Home. If the Desktop half does not update, use Install from Git with `jamahr/hermes-project-home`, then **Advanced → Force reinstall**.
 
 ## Notes and agent awareness
 

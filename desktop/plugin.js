@@ -1,4 +1,4 @@
-import { host, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, Button, Input, Textarea, Dialog, DialogContent, DialogHeader, DialogTitle, Codicon, EmptyState, useQuery, useQueryClient, useValue, gatewayActivationEpoch, useGatewayActivationEpoch } from '@hermes/plugin-sdk'
+import { host, COMPOSER_AREAS, DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger, ROUTES_AREA, SIDEBAR_NAV_AREA, PALETTE_AREA, Button, Input, Textarea, Dialog, DialogContent, DialogHeader, DialogTitle, Codicon, EmptyState, useQuery, useQueryClient, useValue, gatewayActivationEpoch, useGatewayActivationEpoch } from '@hermes/plugin-sdk'
 import { useState, useEffect } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -94,12 +94,8 @@ function CreateProject({ ctx, pins, close, created }) {
 }
 function Project({ ctx, project: p, projects, pins, changePin, epoch, profile }) {
   const qc = useQueryClient()
-  const [dialog, setDialog] = useState(''), [search, setSearch] = useState(''), [searchOpen, setSearchOpen] = useState(false), [showAll, setShowAll] = useState(false), [prompt, setPrompt] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState(''), [pinOverrides, setPinOverrides] = useState({})
-  const model = useValue(host.state.model)
-  const [chosenProvider, setChosenProvider] = useState(''), [chosenModel, setChosenModel] = useState(''), [effort, setEffort] = useState(''), [tier, setTier] = useState(''), [showAutomated, setShowAutomated] = useState(false)
-  const catalog = useQuery({ queryKey: ['project-home', epoch, profile, 'models'], queryFn: () => request('model.options', { explicit_only: true }), staleTime: 120000, retry: false })
-  const providers = (catalog.data?.providers || []).filter(x => x.slug)
-  const selectedProvider = providers.find(x => x.slug === chosenProvider)
+  const [dialog, setDialog] = useState(''), [search, setSearch] = useState(''), [searchOpen, setSearchOpen] = useState(false), [showAll, setShowAll] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [pinOverrides, setPinOverrides] = useState({})
+  const [showAutomated, setShowAutomated] = useState(false)
   const prefix = ['project-home', epoch, profile, p.id]
   const info = useQuery({ queryKey: [...prefix, 'info'], queryFn: () => ctx.rest('/project' + query(p.id)) })
   const instructionsName = info.data?.instructions_file || 'AGENTS.md'
@@ -117,18 +113,22 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
   const automatedCount = unique.filter(s => !conversational(s)).length
   const root = (p.primary_path || '').replace(/\/+$/, '')
   const jobs = (cron.data?.jobs || []).filter(j => typeof j.workdir === 'string' && (j.workdir === root || j.workdir.startsWith(root + '/')))
-  async function send() {
-    if (!prompt.trim() || busy || !root) return
-    const text = prompt.trim(), captured = gatewayActivationEpoch(); setBusy(true); setError('')
+  async function newChat() {
+    if (busy || !root) return
+    setBusy(true)
+    const before = host.state.focusedStoredSessionId.get(), epoch = gatewayActivationEpoch()
     try {
-      const created = await request('session.create', { cwd: root, cwd_explicit: true, source: 'desktop', ...(chosenModel ? { model: chosenModel, provider: chosenProvider } : {}), ...(effort ? { reasoning_effort: effort } : {}), ...(tier ? { service_tier: tier } : {}) })
-      if (!created.session_id || !created.stored_session_id) throw new Error('Session creation returned no session id.')
-      if (gatewayActivationEpoch() !== captured) throw new Error('Connection changed; the new session was not sent a prompt.')
-      await request('prompt.submit', { session_id: created.session_id, text, submission_id: crypto.randomUUID() })
-      setPrompt('')
-      if (gatewayActivationEpoch() !== captured) throw new Error('Prompt sent on the previous connection; open that connection to view it.')
-      await host.openSession(created.stored_session_id)
-    } catch (e) { setError(fail(e)) } finally { setBusy(false) }
+      host.newChat()
+      let id
+      for (let i = 0; i < 150; i++) {
+        if (gatewayActivationEpoch() !== epoch) throw new Error('Connection changed while opening chat')
+        id = host.state.focusedStoredSessionId.get()
+        if (id && id !== before && host.state.focusedSessionId.get()) break
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      if (!id || id === before || !host.state.focusedSessionId.get()) throw new Error('Could not open a fresh chat')
+      await request('session.workspace.move', { session_key: id, cwd: root })
+    } catch (e) { host.notify({ kind: 'error', message: `New chat: ${fail(e)}` }) } finally { setBusy(false) }
   }
   async function jobAction(job, action) {
     try { await request('cron.manage', { action, name: job.job_id }); await cron.refetch() } catch (e) { setError(fail(e)) }
@@ -136,7 +136,7 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
   return jsxs('div', { className: 'h-full overflow-auto', children: [
     jsxs('div', { className: `flex items-center justify-between border-b ${border} px-8 py-4`, children: [jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { onClick: () => go(), children: 'Projects' }), jsx('span', { className: muted, children: '/' }), jsx('select', { className: 'bg-transparent', style: { fieldSizing: 'content', maxWidth: '15rem' }, value: p.id, onChange: e => { if (e.target.value === '__rename') setDialog('rename'); else if (e.target.value === '__archive') setDialog('archive'); else if (e.target.value === '__folder') void ctx.runAction('view.showFiles'); else go(e.target.value) }, children: [ ...projects.map(x => jsx('option', { value: x.id, children: x.name }, x.id)), jsx('option', { value: '__rename', children: 'Rename…' }), jsx('option', { value: '__folder', children: 'Open file browser' }), jsx('option', { value: '__archive', children: 'Archive…' })] })] }), jsxs('div', { className: 'flex gap-2', children: [button(icon('search'), () => setSearchOpen(!searchOpen), { 'aria-label': 'Search recents' }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] })] }),
     jsxs('div', { className: 'mx-auto max-w-6xl px-8 py-12', children: [jsx('h1', { className: 'mb-10 text-4xl', style: { fontFamily: 'serif' }, children: p.name }), jsx('style', { children: '.project-home-columns{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:48px}.project-home-columns>*{min-width:0;box-sizing:border-box}.project-home-columns textarea{width:100%;max-width:100%;box-sizing:border-box}@media(max-width:900px){.project-home-columns{grid-template-columns:minmax(0,1fr)}}' }), jsxs('div', { className: 'project-home-columns', children: [
-      jsxs('main', { children: [jsxs('div', { className: `rounded-xl border ${border} p-4`, children: [area(prompt, setPrompt, `New session in ${p.name}`, { rows: 4, onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } } }), jsxs('div', { className: 'mt-2 flex items-end justify-between gap-2', children: [jsxs('div', { className: 'flex min-w-0 flex-1 flex-wrap items-center gap-2', children: [jsx('select', { 'aria-label': 'Provider', value: chosenProvider, className: 'max-w-full bg-transparent', style: { fieldSizing: 'content', minWidth: 120, maxWidth: '14rem' }, onChange: e => { setChosenProvider(e.target.value); setChosenModel('') }, children: [jsx('option', { value: '', children: 'Default provider' }), ...providers.map(x => jsx('option', { value: x.slug, children: x.name || x.slug }, x.slug))] }), jsx('select', { 'aria-label': 'Model', value: chosenModel, disabled: !chosenProvider, className: 'max-w-full bg-transparent', style: { fieldSizing: 'content', minWidth: 185, maxWidth: '18rem' }, onChange: e => setChosenModel(e.target.value), children: [jsx('option', { value: '', children: model ? `Default (${model.replace(/\[.*?\]$/, '')})` : 'Default model' }), ...(selectedProvider?.models || []).map(x => { const id = typeof x === 'string' ? x : x.id || x.name; return jsx('option', { value: id, children: typeof x === 'string' ? x : x.name || id }, id) })] }), jsx('select', { 'aria-label': 'Reasoning effort', value: effort, className: 'bg-transparent', onChange: e => setEffort(e.target.value), children: ['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map(x => jsx('option', { value: x, children: x || 'Default effort' }, x)) }), jsx('select', { 'aria-label': 'Service tier', value: tier, className: 'bg-transparent', onChange: e => setTier(e.target.value), children: ['', 'normal', 'priority', 'flex'].map(x => jsx('option', { value: x, children: x || 'Default tier' }, x)) })] }), button(busy ? 'Starting…' : 'Send', send, { variant: 'default', disabled: busy || !prompt.trim() || !root })] })] }), catalog.error && small(`Model catalog unavailable: ${fail(catalog.error)}`), error && small(error, 'mt-4'), jsxs('div', { className: 'mt-4', children: [small('Recents', 'mb-3'), button(`${showAutomated ? 'Hide' : 'Show'} automated runs (${automatedCount})`, () => setShowAutomated(!showAutomated)), searchOpen && field(search, setSearch, 'Search recents'), sessions.isLoading ? small('Loading sessions…') : sessions.error ? jsxs('div', { children: [small(`Could not load sessions: ${fail(sessions.error)}`), button('Retry', () => sessions.refetch())] }) : !visible.length ? small(search ? 'No matching sessions.' : 'No recent sessions.') : (showAll ? visible : visible.slice(0, 10)).map(s => { const sid = s._lineage_root_id || s.id; const pinned = pinOverrides[sid] ?? pinQuery.data?.pinned?.[sid] ?? false; return jsxs('div', { className: `group flex items-center gap-3 border-b ${border} py-3`, children: [jsx('button', { className: 'min-w-0 flex-1 truncate text-left', onClick: () => void host.openSession(sid), children: s.title || s.preview || 'Untitled session' }), small(timeAgo(s.last_active || s.started_at)), button(icon(pinned ? 'pinned' : 'pin'), () => { if (!host.sessions?.pin) { setError('Session pinning requires a newer Desktop SDK.'); return } host.sessions.pin(sid, !pinned); setPinOverrides(v => ({ ...v, [sid]: !pinned })) }, { 'aria-label': pinned ? 'Unpin session' : 'Pin session', className: 'opacity-0 group-hover:opacity-100 focus:opacity-100' })] }, s.id) }), visible.length > 10 && button(showAll ? 'Show less' : 'Show all', () => setShowAll(!showAll))] })] }),
+      jsxs('main', { children: [button(busy ? 'Opening…' : 'New chat', newChat, { variant: 'default', disabled: busy || !root }), small("Opens a chat in this project's folder", 'mt-2'), error && small(error, 'mt-4'), jsxs('div', { className: 'mt-4', children: [small('Recents', 'mb-3'), button(`${showAutomated ? 'Hide' : 'Show'} automated runs (${automatedCount})`, () => setShowAutomated(!showAutomated)), searchOpen && field(search, setSearch, 'Search recents'), sessions.isLoading ? small('Loading sessions…') : sessions.error ? jsxs('div', { children: [small(`Could not load sessions: ${fail(sessions.error)}`), button('Retry', () => sessions.refetch())] }) : !visible.length ? small(search ? 'No matching sessions.' : 'No recent sessions.') : (showAll ? visible : visible.slice(0, 10)).map(s => { const sid = s._lineage_root_id || s.id; const pinned = pinOverrides[sid] ?? pinQuery.data?.pinned?.[sid] ?? false; return jsxs('div', { className: `group flex items-center gap-3 border-b ${border} py-3`, children: [jsx('button', { className: 'min-w-0 flex-1 truncate text-left', onClick: () => void host.openSession(sid), children: s.title || s.preview || 'Untitled session' }), small(timeAgo(s.last_active || s.started_at)), button(icon(pinned ? 'pinned' : 'pin'), () => { if (!host.sessions?.pin) { setError('Session pinning requires a newer Desktop SDK.'); return } host.sessions.pin(sid, !pinned); setPinOverrides(v => ({ ...v, [sid]: !pinned })) }, { 'aria-label': pinned ? 'Unpin session' : 'Pin session', className: 'opacity-0 group-hover:opacity-100 focus:opacity-100' })] }, s.id) }), visible.length > 10 && button(showAll ? 'Show less' : 'Show all', () => setShowAll(!showAll))] })] }),
       jsxs('aside', { children: [jsx(ProjectNotes, { ctx, project: p.id, refreshInstructions: () => qc.invalidateQueries({ queryKey: prefix }) }), info.data?.instructions_message && small(`${info.data.instructions_message} ${(info.data.ancestor_instruction_sources || []).join(', ')}`, 'mb-3'), info.error && jsx(Message, { title: 'Plugin backend unavailable', description: 'Enable the project-home backend for this profile and restart the gateway.' }),
         jsx(SideRow, { iconName: 'note', label: 'Instructions', action: 'Edit', onClick: () => setDialog('instructions'), children: instructions.isLoading ? small('Loading…') : instructions.error ? small(fail(instructions.error)) : instructions.data?.content ? preview(instructions.data.content) : small('No instructions yet.') }),
         jsx(SideRow, { iconName: 'files', label: 'Context', action: 'Add', onClick: () => setDialog('context-add'), children: contexts.isLoading ? small('Loading…') : contexts.error ? small(fail(contexts.error)) : (contexts.data?.files || []).length ? contexts.data.files.map(f => jsx('button', { className: `block w-full truncate py-1 text-left text-xs ${muted}`, onClick: () => setDialog(`context:${f.name}`), children: `${f.name} · ${f.size} B` }, f.name)) : small('No context files.') }),
@@ -183,7 +183,7 @@ function ContextView({ ctx, project, name, close }) {
   return jsx(Modal, { title: name, close, children: data.isLoading ? small('Loading…') : data.error ? small(fail(data.error)) : jsx('pre', { className: 'max-h-96 overflow-auto whitespace-pre-wrap break-all text-sm', children: data.data?.content || '(empty)' }) })
 }
 function CronAdd({ ctx, project, close, done }) {
-  const [name, setName] = useState(''), [schedule, setSchedule] = useState(''), [prompt, setPrompt] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
+  const [name, setName] = useState(''), [schedule, setSchedule] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('')
   async function submit() { setBusy(true); setError(''); try { await ctx.rest('/cron', { method: 'POST', body: { project, name: name.trim(), schedule: schedule.trim(), prompt: prompt.trim() } }); await done(); close() } catch (e) { setError(fail(e)) } finally { setBusy(false) } }
   return jsx(Modal, { title: 'Schedule a task', close, children: jsxs('div', { className: 'flex flex-col gap-3', children: [field(name, setName, 'Name'), field(schedule, setSchedule, 'Schedule, e.g. every day at 9am'), area(prompt, setPrompt, 'Prompt', { rows: 6 }), error && small(error), button(busy ? 'Adding…' : 'Add scheduled task', submit, { disabled: busy || !name.trim() || !schedule.trim() || !prompt.trim() })] }) })
 }
@@ -192,8 +192,31 @@ function Rename({ project, close, done }) {
   async function save() { setBusy(true); try { await request('projects.update', { id: project.id, name: name.trim() }); await done(); close() } catch (e) { setError(fail(e)) } finally { setBusy(false) } }
   return jsx(Modal, { title: 'Rename project', close, children: jsxs('div', { className: 'flex flex-col gap-3', children: [field(name, setName, 'Project name'), error && small(error), button('Save', save, { disabled: busy || !name.trim() })] }) })
 }
+function ComposerProjectPicker({ pins }) {
+  const cwd = useValue(host.state.cwd)
+  const id = useValue(host.state.focusedStoredSessionId)
+  const profile = useValue(host.state.profile)
+  const epoch = useGatewayActivationEpoch()
+  const [, refresh] = useState(0)
+  useEffect(() => pins.subscribe(() => refresh(n => n + 1)), [])
+  const list = useQuery({ queryKey: ['project-home', epoch, profile, 'projects'], queryFn: () => request('projects.list', {}), refetchInterval: 30000 })
+  const projects = (list.data?.projects || []).filter(p => !p.archived && p.primary_path)
+  const activity = useQuery({ queryKey: ['project-home', epoch, profile, 'activity', projects.map(p => p.id).join(',')], queryFn: async () => Object.fromEntries(await Promise.all(projects.map(async p => [p.id, sessionRows(await request('projects.project_sessions', { project_id: p.id })).filter(conversational)]))), refetchInterval: 30000, enabled: projects.length > 0 })
+  const last = p => Math.max(0, ...(activity.data?.[p.id] || []).map(s => Number(s.last_active || s.started_at || 0))) || Number(p.created_at || 0)
+  const matches = projects.flatMap(p => [p.primary_path, ...(p.folders || [])].map(f => ({ p, path: (typeof f === 'string' ? f : f?.path || '').replace(/\/+$/, '') }))).filter(x => x.path && (cwd === x.path || cwd?.startsWith(x.path + '/'))).sort((a, b) => b.path.length - a.path.length)
+  const selected = matches[0]?.p
+  if (!id) return null
+  const sorted = [...projects].sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || last(b) - last(a))
+  async function move(p) {
+    const session_key = host.state.focusedStoredSessionId.get()
+    if (!session_key) return
+    try { await request('session.workspace.move', { session_key, cwd: p.primary_path }) }
+    catch (e) { host.notify({ kind: 'error', message: `Move project: ${fail(e)}` }) }
+  }
+  return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
+}
 export default {
-  id: 'project-home', name: 'Project Home', version: '0.2.0', defaultEnabled: false,
+  id: 'project-home', name: 'Project Home', version: '0.3.0', defaultEnabled: false,
   register(ctx) {
     let board = {}, disposers = [], listeners = new Set(), known = [], retired = false, generation = 0
     const storageKey = () => `pinned-projects:${host.state.connectionId?.get() || 'local'}:${host.state.profile.get() || 'default'}`
@@ -203,7 +226,7 @@ export default {
       disposers = projects.filter(p => board[p.id]?.pinned).map((p, i) => ctx.register({ id: `pin-${i}`, area: SIDEBAR_NAV_AREA, order: 101 + i, data: { path: `${BASE}?project=${enc(p.id)}`, label: p.name, codicon: 'project' } }))
     }
     function publish() { sync(known); for (const fn of listeners) fn() }
-    const pins = { has: id => !!board[id]?.pinned, get: id => board[id] || {}, sync }
+    const pins = { has: id => !!board[id]?.pinned, get: id => board[id] || {}, sync, subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn) } }
     async function updateBoard(p, patch) {
       const current = generation
       try {
@@ -235,6 +258,7 @@ export default {
     const stopConnection = host.state.connectionId?.listen(refreshPinned) || (() => {})
     refreshPinned()
     function Page() { const [, refresh] = useState(0); useEffect(() => { const fn = () => refresh(n => n + 1); listeners.add(fn); return () => listeners.delete(fn) }, []); return jsx(App, { ctx, pins, changePin }) }
+    ctx.register({ id: 'composer-project', area: COMPOSER_AREAS.leading, render: () => jsx(ComposerProjectPicker, { pins }) })
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: BASE }, render: () => jsx(Page, {}) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, order: 100, data: { path: BASE, label: 'Projects', codicon: 'project' } })
     ctx.register({ id: 'open', area: PALETTE_AREA, data: { id: 'project-home.open', label: 'Open Projects', keywords: ['projects'], run: () => go() } })
