@@ -5,7 +5,7 @@ const vm = require('node:vm')
 const source = fs.readFileSync('desktop/plugin.js', 'utf8').replace(/^import .*$/gm, '').replace('export default {', 'const plugin = {')
 const noop = () => {}
 const jsx = (type, props) => typeof type === 'function' ? type(props || {}) : ({ type, props })
-const sdk = ['SegmentedControl','ConfirmDialog','CopyButton','DropdownMenu','DropdownMenuContent','DropdownMenuItem','DropdownMenuSeparator','DropdownMenuTrigger','Button','Input','Textarea','Dialog','DialogContent','DialogHeader','DialogTitle','Codicon','EmptyState'].reduce((a,k) => (a[k] = k, a), {})
+const sdk = ['Tip','SegmentedControl','ConfirmDialog','CopyButton','DropdownMenu','DropdownMenuContent','DropdownMenuItem','DropdownMenuSeparator','DropdownMenuTrigger','Button','Input','Textarea','Dialog','DialogContent','DialogHeader','DialogTitle','Codicon','EmptyState'].reduce((a,k) => (a[k] = k, a), {})
 const ctx = { rest: async () => ({}) }
 const pins = { has: () => false, get: () => ({}), subscribe: noop }
 const project = { id: 'p', name: 'Project', primary_path: '/tmp/project' }
@@ -30,7 +30,7 @@ test('upload dialog renders folder and oversized skipped file', () => {
   let index = 0
   sandbox.useState = v => { const i = index++; return [i === 2 ? [{path:'docs/small.txt', file:{size:12}, status:'pending'}, {path:'docs/large.bin', file:{size:11000000}, status:'skipped', reason:'Exceeds 10 MiB'}] : (typeof v === 'function' ? v() : v), noop] }
   const text = flatten(sandbox.components.ContextAdd({ctx, project:'p', close:noop, done:noop}))
-  assert.match(text, /docs · 2 files/); assert.match(text, /large.bin/); assert.match(text, /skipped/)
+  assert.match(text, /docs · 2 files/); assert.match(text, /large.bin/); assert.match(text, /Too large/)
 })
 test('note tab renders editor', () => {
   let index = 0
@@ -56,4 +56,19 @@ test('empty states describe context and memory', () => {
   sandbox.useQuery = () => ({data:{},refetch:noop})
   const page = flatten(sandbox.components.Project({ctx,project,projects:[project],pins,changePin:noop}))
   assert.match(page, /Files the agent should know about/); assert.match(page, /Facts the agent records about this project/)
+})
+
+test('cron dialog labels and presets are visible', () => { const text = flatten(sandbox.components.CronAdd({ctx,project:'p',close:noop,done:noop})); assert.match(text, /What should the agent do\?/); assert.match(text, /Every weekday 9am/); assert.match(text, /When/); })
+
+test('expired one-shot tasks cannot resume', () => {
+  const text = flatten(sandbox.components.ScheduledRow({job:{name:'Old',schedule:{kind:'once',run_at:'2020-01-01T09:00:00Z'},enabled:false},action:noop,remove:noop}))
+  assert.match(text, /Expired/); assert.match(text, /Remove/); assert.doesNotMatch(text, /Resume/)
+})
+test('upload dialog has destination, accessible remove and neutral footer', () => {
+  let index = 0
+  sandbox.useState = v => { const i = index++; return [i === 2 ? [{path:'docs/small.txt',file:{size:12},status:'pending'}] : (typeof v === 'function' ? v() : v), noop] }
+  const view = sandbox.components.ContextAdd({ctx,project:'p',close:noop,done:noop})
+  const text = flatten(view), tree = JSON.stringify(view)
+  assert.match(text, /Will be added to context\/docs\//); assert.match(text, /Clear all/); assert.match(text, /folders keep their structure/); assert.match(tree, /Remove docs\/small.txt/); assert.match(tree, /--ui-stroke-secondary/); assert.doesNotMatch(tree, /sticky bottom-0/)
+  sandbox.useState = v => [typeof v === 'function' ? v() : v, noop]
 })
