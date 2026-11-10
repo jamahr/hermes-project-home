@@ -3,7 +3,7 @@
   "label": "Project Home",
   "description": "Project files and context for Hermes Desktop",
   "icon": "Folder",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "tab": { "path": "/project-home", "hidden": true },
   "entry": "dist/index.js",
   "api": "plugin_api.py"

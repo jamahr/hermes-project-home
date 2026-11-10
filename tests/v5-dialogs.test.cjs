@@ -11,10 +11,10 @@ const pins = { has: () => false, get: () => ({}), subscribe: noop }
 const project = { id: 'p', name: 'Project', primary_path: '/tmp/project' }
 const sandbox = { ...sdk, jsx, jsxs: jsx, useState: v => [typeof v === 'function' ? v() : v, noop], useEffect: noop, useRef: v => ({ current:v }), useQuery: () => ({data: {}, refetch: noop}), useQueryClient: () => ({invalidateQueries: noop}), useValue: () => '', gatewayActivationEpoch: () => 0, useGatewayActivationEpoch: () => 0, host: {state: {profile:{get:()=>''}}, request: noop}, window: {location:{hash:''}}, URLSearchParams, encodeURIComponent, Map, Set, Date, Error, String, Math, Object, Array }
 vm.createContext(sandbox)
-vm.runInContext(source + '\nthis.components = { CreateProject, Rename, FileEditor, ContextAdd, ContextView, CronAdd, ComposerProjectPicker, Hub, Project, Modal, ScheduledRow, preview }', sandbox)
+vm.runInContext(source + '\nthis.components = { CreateProject, Rename, FileEditor, ContextAdd, ContextView, CronAdd, ComposerProjectPicker, Hub, Project, Modal, ScheduledRow, SideRow, preview }', sandbox)
 for (const [name, Component] of Object.entries(sandbox.components).filter(([name]) => name !== 'preview')) {
   test(`${name} renders without throwing`, () => {
-    assert.doesNotThrow(() => Component({ ctx, project: name === 'Rename' || name === 'Project' ? project : 'p', projects: [project], pins, changePin: noop, close: noop, done: noop, created: noop, job: {job_id:'j'}, action: noop, remove: noop, name: 'test.txt', title: 'Archive project?' }))
+    assert.doesNotThrow(() => Component({ ctx, project: name === 'Rename' || name === 'Project' ? project : 'p', projects: [project], pins, changePin: noop, close: noop, done: noop, created: noop, job: {job_id:'j'}, action: noop, remove: noop, name: 'test.txt', title: 'Archive project?', label: 'Instructions' }))
   })
 }
 
@@ -52,10 +52,37 @@ test('scheduled row and confirm dialog render', () => {
   assert.match(JSON.stringify(page), /ConfirmDialog/)
   sandbox.useState = v => [typeof v === 'function' ? v() : v, noop]
 })
-test('empty states describe context and memory', () => {
+function nodes(node, predicate, out = []) {
+  if (Array.isArray(node)) { node.forEach(n => nodes(n, predicate, out)); return out }
+  if (!node || typeof node !== 'object') return out
+  if (predicate(node)) out.push(node)
+  nodes(node.props?.children, predicate, out)
+  return out
+}
+test('project columns place notes before recents and new session before modules', () => {
+  sandbox.useState = v => [typeof v === 'function' ? v() : v, noop]
   sandbox.useQuery = () => ({data:{},refetch:noop})
-  const page = flatten(sandbox.components.Project({ctx,project,projects:[project],pins,changePin:noop}))
-  assert.match(page, /Files the agent should know about/); assert.match(page, /Facts the agent records about this project/)
+  const page = sandbox.components.Project({ctx,project,projects:[project],pins,changePin:noop})
+  const main = nodes(page, n => n.type === 'main')[0], aside = nodes(page, n => n.type === 'aside')[0]
+  assert.match(flatten(main), /Project notes[\s\S]*Recents/)
+  assert.doesNotMatch(flatten(main), /New session/)
+  assert.match(flatten(aside), /New session[\s\S]*Instructions[\s\S]*Context[\s\S]*Memory[\s\S]*Scheduled/)
+  assert.doesNotMatch(flatten(aside), /Project notes/)
+  assert.doesNotMatch(flatten(page), /Starts a chat that uses|Your objectives, considerations|Files the agent should know about|Facts the agent records about this project|No instructions yet|No scheduled jobs/)
+})
+test('module heading toggles preview independently of its action', () => {
+  let expanded = false, actions = 0
+  sandbox.useState = () => [expanded, value => { expanded = typeof value === 'function' ? value(expanded) : value }]
+  const render = () => sandbox.components.SideRow({iconName:'note',label:'Instructions',action:'Edit',onClick:() => actions++,children:'Useful preview'})
+  let view = render(), heading = nodes(view, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)[0]
+  assert.equal(heading.props['aria-expanded'], false); assert.ok(heading.props['aria-controls']); assert.doesNotMatch(flatten(view), /Useful preview/)
+  nodes(view, n => n.type === 'button' && n.props.children === 'Edit')[0].props.onClick()
+  assert.equal(actions, 1); assert.equal(expanded, false)
+  heading.props.onClick(); view = render(); heading = nodes(view, n => n.type === 'button' && n.props['aria-expanded'] !== undefined)[0]
+  assert.equal(heading.props['aria-expanded'], true); assert.match(flatten(view), /Useful preview/)
+  assert.equal(nodes(view, n => n.props?.id === heading.props['aria-controls']).length, 1)
+  heading.props.onClick(); assert.doesNotMatch(flatten(render()), /Useful preview/)
+  sandbox.useState = v => [typeof v === 'function' ? v() : v, noop]
 })
 
 test('cron dialog labels and presets are visible', () => { const text = flatten(sandbox.components.CronAdd({ctx,project:'p',close:noop,done:noop})); assert.match(text, /What should the agent do\?/); assert.match(text, /Every weekday 9am/); assert.match(text, /When/); })

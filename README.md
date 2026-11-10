@@ -5,7 +5,7 @@ A Cowork-style project workspace: a stable **Projects** navigation item, a proje
 ## Features
 
 - Projects hub with search, creation, recent activity, and project shortcuts.
-- Project page with breadcrumbs, a New session button, segmented recent chats and automated runs, and project notes.
+- Project page with notes above recent chats and automated runs, plus a New session button and collapsible context modules in the sidebar.
 - Native composer project picker to move chats between project folders.
 - **Project notes:** a visible text area for objectives, considerations, and high-level direction—not a detailed/exhaustive plan or standing instructions. Explicit Save, saved/unsaved indicators, and conflict detection. Stored in `PROJECT_NOTES.md`.
 - **Instructions:** edit the effective project-root context file; ancestor sources are reported read-only.
