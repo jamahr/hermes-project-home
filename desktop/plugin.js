@@ -9,7 +9,7 @@ const enc = encodeURIComponent
 const STATUSES = ['Backlog', 'To Do', 'In Progress', 'Done']
 const conversational = s => !['tool', 'cron', 'kanban', 'subagent'].includes((s.source || '').toLowerCase()) && !s.archived && !s.parent_session_id
 const sessionRows = data => [...new Map((data?.project?.repos || []).flatMap(r => (r.groups || []).flatMap(g => g.sessions || [])).map(s => [s._lineage_root_id || s.id, s])).values()]
-const go = id => host.navigate(id ? `${BASE}?project=${enc(id)}` : BASE)
+const go = (id, view) => host.navigate(id ? `${BASE}?project=${enc(id)}` : view === 'archived' ? `${BASE}?view=archived` : BASE)
 const query = (project, name) => `?project=${enc(project)}${name ? `&name=${enc(name)}` : ''}`
 const fail = e => e instanceof Error ? e.message : String(e)
 const humanSize = n => { n = Number(n) || 0; return n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / (1024 * 1024)).toFixed(1)} MB` }
@@ -31,6 +31,30 @@ async function openProjectChat(project) {
   if (!result?.stored_session_id) throw new Error('Session creation returned no stored ID')
   if (gatewayActivationEpoch() !== epoch) throw new Error('Connection changed while opening chat')
   await host.openSession(result.stored_session_id)
+  // The chat the composer is now bound to must carry the project folder even if the
+  // open path rebuilt its runtime. workspace.move re-anchors a live draft or a saved row.
+  await request('session.workspace.move', { session_key: result.stored_session_id, cwd: project.primary_path, profile }).catch(() => undefined)
+  return result.stored_session_id
+}
+// Put the chat the user is looking at into a project. A chat that already has a stored
+// id (including a fresh, not-yet-sent draft) is re-anchored in place, exactly like the
+// sidebar's Move to project; only a chat with no session at all gets a new one.
+async function assignProject(p) {
+  const key = host.state.focusedStoredSessionId.get()
+  const profile = host.state.profile.get()
+  if (key) {
+    try {
+      const moved = await request('session.workspace.move', { session_key: key, cwd: p.primary_path, profile })
+      if (!underPath(p.primary_path, moved?.cwd || p.primary_path)) throw new Error(`the chat landed in ${moved?.cwd}`)
+      return { key, created: false }
+    } catch (e) {
+      if (!/not found|4007/i.test(fail(e))) throw e
+    }
+  }
+  const draft = host.composer?.getDraft ? await host.composer.getDraft('new').catch(() => null) : null
+  const created = await openProjectChat(p)
+  if (draft && host.composer?.setDraft) await host.composer.setDraft(created, draft).catch(() => undefined)
+  return { key: created, created: true }
 }
 function timeAgo(value) {
   if (!value) return ''
@@ -44,10 +68,20 @@ function Modal({ title, close, children }) {
   return jsx(Dialog, { open: true, onOpenChange: open => { if (!open) close() }, children: jsxs(DialogContent, { children: [jsx(DialogHeader, { children: jsx(DialogTitle, { children: title }) }), children] }) })
 }
 function footer(close, action, extra = null) { return jsxs('div', { className: 'flex justify-end gap-2 pt-3', style: { borderTop: '1px solid var(--ui-stroke-secondary)' }, children: [button('Cancel', close, { variant: 'secondary' }), extra, action] }) }
-function routeId() {
+function routeParam(name) {
   const hash = window.location.hash.slice(1)
   const q = hash.indexOf('?')
-  return q < 0 ? '' : (new URLSearchParams(hash.slice(q + 1)).get('project') || '').slice(0, 128)
+  return q < 0 ? '' : (new URLSearchParams(hash.slice(q + 1)).get(name) || '').slice(0, 128)
+}
+const routeId = () => routeParam('project')
+const routeView = () => routeParam('view') === 'archived' ? 'archived' : 'active'
+const samePath = (a, b) => (a || '').replace(/\/+$/, '') === (b || '').replace(/\/+$/, '')
+const underPath = (root, cwd) => { const r = (root || '').replace(/\/+$/, ''); return !!r && !!cwd && (cwd === r || cwd.startsWith(r + '/')) }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+async function waitFor(test, ms = 4000) { const end = Date.now() + ms; while (Date.now() < end) { if (test()) return true; await sleep(100) } return test() }
+async function setArchived(qc, p, archived) {
+  await request('projects.archive', archived ? { id: p.id } : { id: p.id, restore: true })
+  await qc.invalidateQueries({ queryKey: ['project-home'] })
 }
 function App({ ctx, pins, changePin }) {
   const [id, setId] = useState(routeId)
@@ -55,15 +89,19 @@ function App({ ctx, pins, changePin }) {
   const epoch = useGatewayActivationEpoch()
   useEffect(() => { const fn = () => setId(routeId()); window.addEventListener('hashchange', fn); return () => window.removeEventListener('hashchange', fn) }, [])
   const list = useQuery({ queryKey: ['project-home', epoch, profile, 'projects'], queryFn: () => request('projects.list', {}), refetchInterval: 30000 })
-  const projects = (list.data?.projects || []).filter(p => !p.archived)
+  const [view, setView] = useState(routeView)
+  useEffect(() => { const fn = () => setView(routeView()); window.addEventListener('hashchange', fn); return () => window.removeEventListener('hashchange', fn) }, [])
+  const all = list.data?.projects || []
+  const projects = all.filter(p => !p.archived)
+  const archived = all.filter(p => p.archived)
   useEffect(() => { pins.sync(projects) }, [list.data, profile, epoch])
   if (list.isLoading) return jsx(Message, { title: 'Loading projects…' })
   if (list.error) return jsx(Message, { title: 'Projects unavailable', description: fail(list.error) })
-  const project = projects.find(p => p.id === id || p.slug === id)
-  if (id && !project) return jsxs('div', { className: 'p-8', children: [button('Projects', () => go()), jsx(Message, { title: 'Project not found', description: 'It may have been archived or belongs to another profile.' })] })
-  return project ? jsx(Project, { key: `${epoch}:${project.id}`, ctx, project, projects, pins, changePin, epoch, profile }) : jsx(Hub, { ctx, projects, pins, changePin, epoch, profile })
+  const project = all.find(p => p.id === id || p.slug === id)
+  if (id && !project) return jsxs('div', { className: 'p-8', children: [button('Projects', () => go()), jsx(Message, { title: 'Project not found', description: 'It may have been deleted or belongs to another profile.' })] })
+  return project ? jsx(Project, { key: `${epoch}:${project.id}`, ctx, project, projects, pins, changePin, epoch, profile }) : jsx(Hub, { ctx, projects, archived, view, pins, changePin, epoch, profile })
 }
-function Hub({ ctx, projects, pins, changePin, epoch, profile }) {
+function Hub({ ctx, projects, archived = [], view = 'active', pins, changePin, epoch, profile }) {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
@@ -72,13 +110,36 @@ function Hub({ ctx, projects, pins, changePin, epoch, profile }) {
   const last = p => Math.max(0, ...(activity.data?.[p.id] || []).map(s => Number(s.last_active || s.started_at || 0))) || Number(p.created_at || 0)
   return jsxs('div', { className: 'h-full overflow-auto p-8', children: [
     jsxs('div', { className: 'flex items-center justify-between', children: [jsx('h1', { className: 'text-3xl', style: { fontFamily: 'serif' }, children: 'Projects' }), button('New project', () => setCreating(true), { variant: 'default' })] }),
-    jsx('div', { className: 'my-6 max-w-md', children: field(search, setSearch, 'Search projects') }),
-    activity.error && small(`Activity unavailable: ${fail(activity.error)}`, 'mb-3'),
-    jsx('div', { className: 'overflow-x-auto pb-4', children: jsx('div', { className: 'project-home-board', style: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))', gap: 16, minWidth: 928, alignItems: 'stretch' }, children: STATUSES.map(status => {
+    jsxs('div', { className: 'my-6 flex flex-wrap items-center gap-3', children: [jsx(SegmentedControl, { value: view, onChange: v => go('', v), options: [{ id: 'active', label: `Active (${projects.length})` }, { id: 'archived', label: `Archived (${archived.length})` }] }), jsx('div', { className: 'min-w-64 max-w-xl flex-1', children: field(search, setSearch, 'Search projects') })] }),
+    view === 'archived' ? jsx(ArchivedList, { projects: archived, search, epoch, profile }) : null,
+    view !== 'archived' && activity.error && small(`Activity unavailable: ${fail(activity.error)}`, 'mb-3'),
+    view !== 'archived' && jsx('div', { className: 'overflow-x-auto pb-4', children: jsx('div', { className: 'project-home-board', style: { display: 'grid', gridTemplateColumns: 'repeat(4, minmax(220px, 1fr))', gap: 16, minWidth: 928, alignItems: 'stretch' }, children: STATUSES.map(status => {
       const cards = filtered.filter(p => (pins.get(p.id).status || 'To Do') === status).sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || last(b) - last(a))
       return jsxs('section', { className: 'rounded-xl border p-3 ' + border, style: { minWidth: 0, minHeight: '60vh', background: 'var(--ui-bg-secondary)' }, onDragOver: e => e.preventDefault(), onDrop: e => { e.preventDefault(); const p = projects.find(x => x.id === e.dataTransfer.getData('text/plain')); if (p) void pins.update(p, { status }) }, children: [jsxs('h2', { className: 'mb-3 font-medium', children: [status, ' · ', cards.length] }), !cards.length && small('Drop projects here'), ...cards.map(p => jsxs('article', { draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', p.id), className: `mb-3 rounded-lg border ${border} p-3`, children: [jsxs('div', { className: 'flex items-center justify-between gap-2', children: [jsx('button', { className: 'min-w-0 text-left font-medium', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' }, onClick: () => go(p.id), children: jsxs('span', { children: [icon('folder'), ' ', p.name] }) }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] }), p.description && jsx('p', { className: `mt-2 text-sm ${muted}`, style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }, children: p.description }), small(activity.data ? `${activity.data[p.id]?.length || 0} chats · ${timeAgo(last(p))}` : 'Loading activity…', 'mt-2'), jsx('select', { 'aria-label': `Move ${p.name} to`, className: 'mt-2 max-w-full bg-transparent text-xs', value: '', onChange: e => { if (e.target.value) void pins.update(p, { status: e.target.value }) }, children: [jsx('option', { value: '', disabled: true, children: 'Move to…' }), ...STATUSES.filter(s => s !== status).map(s => jsx('option', { value: s, children: s }, s))] })] }, p.id))] }, status)
     }) }) }),
     creating && jsx(CreateProject, { ctx, pins, close: () => setCreating(false), created: () => qc.invalidateQueries({ queryKey: ['project-home'] }) })
+  ] })
+}
+function ArchivedList({ projects, search, epoch, profile }) {
+  const qc = useQueryClient()
+  const [busy, setBusy] = useState('')
+  const q = search.toLowerCase()
+  const activity = useQuery({ queryKey: ['project-home', epoch, profile, 'archived-activity', projects.map(p => p.id).join(',')], queryFn: async () => Object.fromEntries(await Promise.all(projects.map(async p => [p.id, sessionRows(await request('projects.project_sessions', { project_id: p.id })).filter(conversational)]))), enabled: projects.length > 0 })
+  const last = p => Math.max(0, ...(activity.data?.[p.id] || []).map(s => Number(s.last_active || s.started_at || 0)))
+  const rows = projects.filter(p => `${p.name} ${p.description || ''} ${p.primary_path || ''}`.toLowerCase().includes(q)).sort((a, b) => last(b) - last(a) || Number(b.created_at || 0) - Number(a.created_at || 0))
+  async function restore(p) {
+    setBusy(p.id)
+    try { await setArchived(qc, p, false); host.notify({ kind: 'success', message: `Restored ${p.name} to the board.`, action: { label: 'Open', onClick: () => go(p.id) } }) } catch (e) { host.notify({ kind: 'error', message: `Restore: ${fail(e)}` }) } finally { setBusy('') }
+  }
+  if (!projects.length) return jsx(Message, { title: 'No archived projects', description: 'Archive a project from its page menu. Its folder, files and chats stay where they are, and you can restore it here.' })
+  const meta = p => { const n = activity.data?.[p.id]?.length; const t = last(p); return activity.data ? `${n || 0} chat${n === 1 ? '' : 's'}${t ? ` · last active ${timeAgo(t)}` : ''}` : 'Loading activity…' }
+  return jsxs('div', { className: 'max-w-3xl', children: [
+    small('Hidden from the board and the project selector. Folders, files and chats are kept.', 'mb-2'),
+    !rows.length && small('No archived projects match your search.', 'py-3'),
+    ...rows.map(p => jsxs('div', { className: `flex items-center gap-4 border-b ${border} py-3`, children: [
+      jsxs('button', { className: 'min-w-0 flex-1 rounded text-left hover:opacity-80', onClick: () => go(p.id), 'aria-label': `Open ${p.name}`, children: [jsx('div', { className: 'truncate font-medium', children: p.name }), p.description && jsx('div', { className: `truncate text-sm ${muted}`, children: p.description }), jsx('div', { className: `mt-0.5 truncate text-xs ${muted}`, children: [meta(p), ' · ', jsx('span', { className: 'font-mono', children: p.primary_path || 'No project folder' })] })] }),
+      button(busy === p.id ? 'Restoring…' : 'Restore', () => void restore(p), { variant: 'outline', size: 'sm', disabled: !!busy, 'aria-label': `Restore ${p.name}` })
+    ] }, p.id))
   ] })
 }
 function CreateProject({ ctx, pins, close, created }) {
@@ -123,6 +184,18 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
   const automatedCount = unique.filter(s => !conversational(s)).length
   const root = (p.primary_path || '').replace(/\/+$/, '')
   const jobs = (cron.data?.jobs || []).filter(j => typeof j.workdir === 'string' && (j.workdir === root || j.workdir.startsWith(root + '/')))
+  const menuProjects = p.archived ? [p, ...projects] : projects
+  async function restore() {
+    setBusy(true)
+    try { await setArchived(qc, p, false); host.notify({ kind: 'success', message: `Restored ${p.name}.` }) } catch (e) { setError(fail(e)) } finally { setBusy(false) }
+  }
+  async function archive() {
+    try {
+      await setArchived(qc, p, true)
+      setDialog(''); go()
+      host.notify({ kind: 'success', message: `Archived ${p.name}. It's in the Archived tab.`, action: { label: 'Undo', onClick: () => { void setArchived(qc, p, false).catch(e => host.notify({ kind: 'error', message: `Undo archive: ${fail(e)}` })) } }, secondaryAction: { label: 'View archive', onClick: () => go('', 'archived') } })
+    } catch (e) { setError(fail(e)); setDialog('') }
+  }
   async function newChat() {
     if (busy || !root) return
     setBusy(true)
@@ -132,10 +205,11 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
     try { await request('cron.manage', { action, name: job.job_id }); await cron.refetch() } catch (e) { setError(fail(e)) }
   }
   return jsxs('div', { className: 'h-full overflow-auto', children: [
-    jsxs('div', { className: `flex items-center justify-between border-b ${border} px-8 py-4`, children: [jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { onClick: () => go(), children: 'Projects' }), jsx('span', { className: muted, children: '/' }), jsx('select', { className: 'bg-transparent', style: { fieldSizing: 'content', maxWidth: '15rem' }, value: p.id, onChange: e => { if (e.target.value === '__rename') setDialog('rename'); else if (e.target.value === '__archive') setDialog('archive'); else if (e.target.value === '__folder') void ctx.runAction('view.showFiles'); else go(e.target.value) }, children: [ ...projects.map(x => jsx('option', { value: x.id, children: x.name }, x.id)), jsx('option', { value: '__rename', children: 'Rename…' }), jsx('option', { value: '__folder', children: 'Open file browser' }), jsx('option', { value: '__archive', children: 'Archive…' })] })] }), jsxs('div', { className: 'flex gap-2', children: [button(icon('search'), () => setSearchOpen(!searchOpen), { 'aria-label': 'Search recents' }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] })] }),
+    jsxs('div', { className: `flex items-center justify-between border-b ${border} px-8 py-4`, children: [jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { onClick: () => go(), children: 'Projects' }), jsx('span', { className: muted, children: '/' }), jsx('select', { className: 'bg-transparent', style: { fieldSizing: 'content', maxWidth: '15rem' }, value: p.id, onChange: e => { if (e.target.value === '__rename') setDialog('rename'); else if (e.target.value === '__archive') setDialog('archive'); else if (e.target.value === '__restore') void restore(); else if (e.target.value === '__folder') void ctx.runAction('view.showFiles'); else go(e.target.value) }, children: [ ...menuProjects.map(x => jsx('option', { value: x.id, children: x.archived ? `${x.name} (archived)` : x.name }, x.id)), jsx('option', { value: '__rename', children: 'Rename…' }), jsx('option', { value: '__folder', children: 'Open file browser' }), p.archived ? jsx('option', { value: '__restore', children: 'Restore project' }) : jsx('option', { value: '__archive', children: 'Archive…' })] })] }), jsxs('div', { className: 'flex gap-2', children: [button(icon('search'), () => setSearchOpen(!searchOpen), { 'aria-label': 'Search recents' }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] })] }),
+    p.archived && jsxs('div', { role: 'status', className: `flex flex-wrap items-center justify-between gap-3 border-b ${border} px-8 py-3`, style: { background: 'var(--ui-bg-secondary)' }, children: [jsxs('span', { className: 'text-sm', children: [icon('archive'), ' This project is archived. It is hidden from the board and the project selector; its folder and chats are unchanged.'] }), jsxs('div', { className: 'flex gap-2', children: [button('View archive', () => go('', 'archived'), { variant: 'outline', size: 'sm' }), button(busy ? 'Restoring…' : 'Restore project', () => void restore(), { variant: 'default', size: 'sm', disabled: busy })] })] }),
     jsxs('div', { className: 'mx-auto max-w-6xl px-8 py-12', children: [jsxs('div', { className: 'mb-10', children: [jsx('h1', { className: 'text-4xl', style: { fontFamily: 'serif' }, children: p.name }), p.description && jsx('p', { className: `mt-2 ${muted}`, children: p.description })] }), jsx('style', { children: '.project-home-columns{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:48px}.project-home-columns>*{min-width:0;box-sizing:border-box}.project-home-columns textarea{width:100%;max-width:100%;box-sizing:border-box}@media(max-width:900px){.project-home-columns{grid-template-columns:minmax(0,1fr)}}' }), jsxs('div', { className: 'project-home-columns', children: [
       jsxs('main', { children: [jsx(ProjectNotes, { ctx, project: p.id, refreshInstructions: () => qc.invalidateQueries({ queryKey: prefix }) }), error && small(error, 'mt-4'), jsxs('div', { className: 'mt-6', children: [jsx('h2', { className: 'mb-3 font-medium', children: 'Recents' }), jsx(SegmentedControl, { value: showAutomated ? 'automated' : 'chats', onChange: v => setShowAutomated(v === 'automated'), options: [{ id: 'chats', label: 'Chats' }, { id: 'automated', label: `Automated (${automatedCount})` }] }), searchOpen && field(search, setSearch, 'Search recents'), sessions.isLoading ? small('Loading sessions…') : sessions.error ? jsxs('div', { children: [small(`Could not load sessions: ${fail(sessions.error)}`), button('Retry', () => sessions.refetch())] }) : !visible.length ? small(search ? 'No matching sessions.' : 'No recent sessions.') : (showAll ? visible : visible.slice(0, 10)).map(s => { const sid = s._lineage_root_id || s.id; const pinned = pinOverrides[sid] ?? pinQuery.data?.pinned?.[sid] ?? false; return jsxs('div', { className: `group flex cursor-pointer items-center gap-3 border-b ${border} py-3 hover:bg-(--ui-bg-secondary)`, onClick: () => void host.openSession(sid), children: [jsx('button', { className: 'min-w-0 flex-1 truncate text-left', onClick: e => { e.stopPropagation(); void host.openSession(sid) }, children: s.title || s.preview || 'Untitled session' }), small(timeAgo(s.last_active || s.started_at)), jsx('span', { className: 'opacity-0 group-hover:opacity-100', children: icon('chevron-right') }), button(icon(pinned ? 'pinned' : 'pin'), e => { e.stopPropagation(); if (!host.sessions?.pin) { setError('Session pinning requires a newer Desktop SDK.'); return } host.sessions.pin(sid, !pinned); setPinOverrides(v => ({ ...v, [sid]: !pinned })) }, { 'aria-label': pinned ? 'Unpin session' : 'Pin session', className: 'opacity-0 group-hover:opacity-100 focus:opacity-100' })] }, s.id) }), visible.length > 10 && button(showAll ? 'Show less' : 'Show all', () => setShowAll(!showAll))] })] }),
-      jsxs('aside', { children: [button(busy ? 'Opening…' : 'New session', newChat, { variant: 'default', className: 'px-5 py-3 text-base', disabled: busy || !root }), info.data?.instructions_message && small(`${info.data.instructions_message} ${(info.data.ancestor_instruction_sources || []).join(', ')}`, 'mb-3'), info.error && jsx(Message, { title: 'Plugin backend unavailable', description: 'Enable the project-home backend for this profile and restart the gateway.' }),
+      jsxs('aside', { children: [button(busy ? 'Opening…' : 'New session', newChat, { variant: p.archived ? 'secondary' : 'default', className: 'px-5 py-3 text-base', disabled: busy || !root }), info.data?.instructions_message && small(`${info.data.instructions_message} ${(info.data.ancestor_instruction_sources || []).join(', ')}`, 'mb-3'), info.error && jsx(Message, { title: 'Plugin backend unavailable', description: 'Enable the project-home backend for this profile and restart the gateway.' }),
         jsx(SideRow, { iconName: 'note', label: 'Instructions', action: 'Edit', onClick: () => setDialog('instructions'), children: instructions.isLoading ? small('Loading…') : instructions.error ? small(fail(instructions.error)) : instructions.data?.content ? preview(instructions.data.content) : null }),
         jsx(SideRow, { iconName: 'files', label: 'Context', action: 'Add files', onClick: () => setDialog('context-add'), children: contexts.isLoading ? small('Loading…') : contexts.error ? small(fail(contexts.error)) : (contexts.data?.files || []).length ? jsx(ContextFiles, { files: contexts.data.files, truncated: contexts.data.truncated, open: path => setDialog(`context:${path}`) }) : null }),
         jsx(SideRow, { iconName: 'book', label: 'Memory', action: memoryPreview ? 'View' : 'Edit', onClick: () => setDialog('memory'), children: memory.isLoading ? small('Loading…') : memory.error ? small(fail(memory.error)) : memoryPreview ? preview(memoryPreview) : null }),
@@ -147,7 +221,7 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
     dialog.startsWith('context:') && jsx(ContextView, { ctx, project: p.id, name: dialog.slice(8), file: (contexts.data?.files || []).find(f => f.path === dialog.slice(8)), close: () => setDialog('') }),
     dialog === 'cron-add' && jsx(CronAdd, { ctx, project: p.id, close: () => setDialog(''), done: () => cron.refetch() }),
     dialog === 'rename' && jsx(Rename, { project: p, close: () => setDialog(''), done: () => qc.invalidateQueries({ queryKey: ['project-home'] }) }),
-    dialog === 'archive' && jsx(Modal, { title: 'Archive project?', close: () => setDialog(''), children: jsxs('div', { children: [small('The folder and its files will not be deleted.'), footer(() => setDialog(''), button('Archive', async () => { try { await request('projects.archive', { id: p.id }); await qc.invalidateQueries({ queryKey: ['project-home'] }); go() } catch (e) { setError(fail(e)); setDialog('') } }, { variant: 'default' }))] }) })
+    dialog === 'archive' && jsx(Modal, { title: 'Archive project?', close: () => setDialog(''), children: jsxs('div', { children: [small('It moves to the Archived tab on the Projects page, where you can open or restore it. The folder, files and chats are not deleted.'), footer(() => setDialog(''), button('Archive', () => void archive(), { variant: 'default' }))] }) })
   ] })
 }
 function ContextFiles({ files, truncated, open }) {
@@ -327,18 +401,19 @@ function ComposerProjectPicker({ pins }) {
   const matches = projects.flatMap(p => [p.primary_path, ...(p.folders || [])].map(f => ({ p, path: (typeof f === 'string' ? f : f?.path || '').replace(/\/+$/, '') }))).filter(x => x.path && (cwd === x.path || cwd?.startsWith(x.path + '/'))).sort((a, b) => b.path.length - a.path.length)
   const selected = matches[0]?.p
   const sorted = [...projects].sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || last(b) - last(a))
+  const [pending, setPending] = useState(null)
   async function move(p) {
-    const session_key = host.state.focusedStoredSessionId.get()
+    setPending(p)
     try {
-      const rows = session_key ? await request('session.list', { limit: 10000, profile: host.state.profile.get() }) : null
-      if (session_key && rows?.sessions?.some(s => s.id === session_key)) await request('session.workspace.move', { session_key, cwd: p.primary_path })
-      else await openProjectChat(p)
-    } catch (e) { host.notify({ kind: 'error', message: `Move project: ${fail(e)}` }) }
+      await assignProject(p)
+      // The label must reflect where the chat really is, not what was clicked.
+      if (!(await waitFor(() => underPath(p.primary_path, host.state.cwd.get()), 5000))) host.notify({ kind: 'warning', message: `${p.name} was assigned, but this window has not picked up the new folder yet. Check the folder chip before sending.` })
+    } catch (e) { host.notify({ kind: 'error', message: `Couldn't put this chat in ${p.name}: ${fail(e)}` }) } finally { setPending(null) }
   }
-  return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), !id && small('Starts a chat in this project; unsent draft text may be lost.', 'px-2 py-1'), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
+  return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), pending ? `${pending.name}…` : selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
 }
 export default {
-  id: 'project-home', name: 'Project Home', version: '0.5.3', defaultEnabled: false,
+  id: 'project-home', name: 'Project Home', version: '0.6.0', defaultEnabled: false,
   register(ctx) {
     let board = {}, disposers = [], listeners = new Set(), known = [], retired = false, generation = 0
     const storageKey = () => `pinned-projects:${host.state.connectionId?.get() || 'local'}:${host.state.profile.get() || 'default'}`

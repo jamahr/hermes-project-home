@@ -5,8 +5,9 @@ A Cowork-style project workspace: a stable **Projects** navigation item, a proje
 ## Features
 
 - Projects hub with search, creation, recent activity, and project shortcuts.
+- **Archive:** Active / Archived tabs on the hub (`#/projects-home?view=archived`). Archived projects list their chat count, last activity and folder; open one (with an archived banner) or restore it. Archiving shows an Undo toast.
 - Project page with notes above recent chats and automated runs, plus a New session button and collapsible context modules in the sidebar.
-- Native composer project picker to move chats between project folders.
+- Native composer project picker. It re-anchors the chat you're looking at, including a fresh draft you haven't sent yet, so the agent sees the project on the first message. Only a window with no session at all gets a new chat, and its draft text is carried over.
 - **Project notes:** a visible text area for objectives, considerations, and high-level direction—not a detailed/exhaustive plan or standing instructions. Explicit Save, saved/unsaved indicators, and conflict detection. Stored in `PROJECT_NOTES.md`.
 - **Instructions:** edit the effective project-root context file; ancestor sources are reported read-only.
 - **Context:** add text notes, or select/drop multiple files and folders into `context/`, preserving folder structure. Choose whether conflicts are renamed, replaced, or skipped; review per-file progress, cancel, and retry failures. The context browser groups folders, previews text, and shows metadata for binary files.
@@ -43,6 +44,10 @@ If ancestor or higher-priority instructions prevent safe root-level activation, 
 `ctx.rest` uses the active connection's profile-scoped `/api/plugins/project-home/` API. Native Desktop SSH mode forwards the server dashboard over a loopback tunnel. Public dashboard exposure and the browser Webapp are not required for normal use.
 
 File operations use no-follow directory handles and descriptor-relative reads/writes within the registered project folder. Upload bodies are bounded before multipart parsing. Saves check expected existence and modification time. This is not an atomic compare-and-swap against external writers; a change in the final check-to-rename window can still be overwritten.
+
+## Changelog
+
+- **0.6.0:** Archived-projects view, restore, and archive undo. Fixed the composer picker on fresh drafts. It used to treat an unsent draft as "no chat", create a second chat in the project and leave the composer on the original draft, so the first message ran with no project. It now moves the draft in place with `session.workspace.move`, and warns if the window doesn't pick up the folder.
 
 ## Known limitations
 
