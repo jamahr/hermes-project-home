@@ -31,6 +31,8 @@ Tested against Hermes Desktop renderer v0.22.7. Uses the current SDK's `host.ope
 
 ## Updating
 
+When Hermes Desktop talks to a remote backend, **Update** only refreshes the server half. Project Home detects this and shows a banner on the Projects page with **Reinstall on this Mac**.
+
 Use **Capabilities → Plugins → Update** on Project Home. If the Desktop half does not update, use Install from Git with `jamahr/hermes-project-home`, then **Advanced → Force reinstall**.
 
 ## Notes and agent awareness
@@ -48,6 +50,9 @@ File operations use no-follow directory handles and descriptor-relative reads/wr
 ## Changelog
 
 - **0.6.0:** Archived-projects view, restore, and archive undo. Fixed the composer picker on fresh drafts. It used to treat an unsent draft as "no chat", create a second chat in the project and leave the composer on the original draft, so the first message ran with no project. It now moves the draft in place with `session.workspace.move`, and warns if the window doesn't pick up the folder.
+
+- **0.6.1:** Board columns no longer reset to To Do after a restart (startup load now retries).
+- **0.6.2:** "Out of date" banner when the Mac's Desktop half is older than the server's copy, with a one-click reinstall link.
 
 ## Known limitations
 

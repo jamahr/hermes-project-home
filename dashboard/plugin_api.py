@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 PLUGIN_ID = "project-home"
-VERSION = "0.4.0"
+VERSION = "0.6.2"
 
 router = APIRouter()
 

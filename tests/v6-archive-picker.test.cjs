@@ -129,3 +129,17 @@ test('board load retries instead of leaving every card in To Do', async () => {
   await new Promise(r => setImmediate(r))
   assert.equal(boardCalls, 3)
 })
+
+for (const [server, shown] of [['0.7.0', true], ['0.6.2', false], ['0.5.3', false], [null, false]]) {
+  test(`update banner ${shown ? 'shows' : 'hidden'} when the server has ${server}`, () => {
+    const { api } = makeSandbox()
+    const sandbox = Object.getPrototypeOf(api) && api
+    const src = source + '\nthis.UpdateBanner = UpdateBanner; this.newer = newer'
+    const sdk = Object.fromEntries(sdkNames.map(n => [n, props => ({ type: n, props })]))
+    const box = { ...sdk, jsx, jsxs: jsx, host: { state: { profile: atom('default') } }, useState: v => [v, noop], useEffect: noop, useRef: v => ({ current: v }), useQuery: () => ({ data: server }), useQueryClient: () => ({}), useValue: noop, gatewayActivationEpoch: () => 1, useGatewayActivationEpoch: () => 1, window: { location: { hash: '' }, addEventListener: noop, removeEventListener: noop }, setTimeout, clearTimeout, URLSearchParams, Promise, Date }
+    vm.createContext(box); vm.runInContext(src, box)
+    const out = box.UpdateBanner({})
+    assert.equal(!!out, shown)
+    if (shown) assert.match(flatten(out), /0\.7\.0 is installed on the server/)
+  })
+}

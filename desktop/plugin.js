@@ -3,6 +3,29 @@ import { useState, useEffect, useRef } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const BASE = '/projects-home'
+const VERSION = '0.6.2'
+const REPO = 'https://github.com/jamahr/hermes-project-home'
+const newer = (a, b) => { const x = String(a || '').split('.').map(Number), y = String(b || '').split('.').map(Number); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0) } return false }
+// The Mac half and the server half of this plugin update separately (Hermes' Update only
+// refreshes the server half for a remote backend). Detect the drift and say so plainly.
+function useServerVersion() {
+  const profile = useValue(host.state.profile)
+  const epoch = useGatewayActivationEpoch()
+  const q = useQuery({ queryKey: ['project-home', epoch, profile, 'server-version'], queryFn: async () => { const r = await request('plugins.manage', { action: 'list' }); return (r?.plugins || []).find(x => x.name === 'project-home')?.version || null }, refetchInterval: 10 * 60 * 1000, staleTime: 5 * 60 * 1000, retry: 2 })
+  return q.data || null
+}
+function UpdateBanner() {
+  const server = useServerVersion()
+  if (!server || !newer(server, VERSION)) return null
+  const link = `hermes://plugin-desktop/install?${new URLSearchParams({ repo: REPO, force: '1' })}`
+  return jsxs('div', { role: 'status', className: `flex flex-wrap items-center justify-between gap-3 border-b ${border} px-8 py-3`, style: { background: 'var(--ui-bg-secondary)' }, children: [
+    jsxs('span', { className: 'text-sm', children: [icon('cloud-download'), ` Project Home ${server} is installed on the server, but this Mac is still showing ${VERSION}. Reinstall the Desktop part to get the new screens.`] }),
+    jsxs('div', { className: 'flex gap-2', children: [
+      button('Reinstall on this Mac', () => { try { window.open(link) } catch { } setTimeout(() => host.navigate('/capabilities?tab=plugins'), 1500) }, { variant: 'default', size: 'sm' }),
+      button('Copy link', () => { void navigator.clipboard?.writeText(link); host.notify({ kind: 'info', message: 'Update link copied. Paste it into Safari\'s address bar to open the reinstall dialog.' }) }, { variant: 'outline', size: 'sm' })
+    ] })
+  ] })
+}
 const muted = 'text-(--ui-text-tertiary)'
 const border = 'border-(--ui-stroke-secondary)'
 const enc = encodeURIComponent
@@ -108,7 +131,7 @@ function Hub({ ctx, projects, archived = [], view = 'active', pins, changePin, e
   const activity = useQuery({ queryKey: ['project-home', epoch, profile, 'activity', projects.map(p => p.id).join(',')], queryFn: async () => Object.fromEntries(await Promise.all(projects.map(async p => [p.id, sessionRows(await request('projects.project_sessions', { project_id: p.id })).filter(conversational)]))), refetchInterval: 30000 })
   const filtered = projects.filter(p => `${p.name} ${p.description || ''} ${p.primary_path || ''}`.toLowerCase().includes(search.toLowerCase()))
   const last = p => Math.max(0, ...(activity.data?.[p.id] || []).map(s => Number(s.last_active || s.started_at || 0))) || Number(p.created_at || 0)
-  return jsxs('div', { className: 'h-full overflow-auto p-8', children: [
+  return jsxs('div', { className: 'h-full overflow-auto', children: [jsx(UpdateBanner, {}), jsxs('div', { className: 'p-8', children: [
     jsxs('div', { className: 'flex items-center justify-between', children: [jsx('h1', { className: 'text-3xl', style: { fontFamily: 'serif' }, children: 'Projects' }), button('New project', () => setCreating(true), { variant: 'default' })] }),
     jsxs('div', { className: 'my-6 flex flex-wrap items-center gap-3', children: [jsx(SegmentedControl, { value: view, onChange: v => go('', v), options: [{ id: 'active', label: `Active (${projects.length})` }, { id: 'archived', label: `Archived (${archived.length})` }] }), jsx('div', { className: 'min-w-64 max-w-xl flex-1', children: field(search, setSearch, 'Search projects') })] }),
     view === 'archived' ? jsx(ArchivedList, { projects: archived, search, epoch, profile }) : null,
@@ -118,7 +141,7 @@ function Hub({ ctx, projects, archived = [], view = 'active', pins, changePin, e
       return jsxs('section', { className: 'rounded-xl border p-3 ' + border, style: { minWidth: 0, minHeight: '60vh', background: 'var(--ui-bg-secondary)' }, onDragOver: e => e.preventDefault(), onDrop: e => { e.preventDefault(); const p = projects.find(x => x.id === e.dataTransfer.getData('text/plain')); if (p) void pins.update(p, { status }) }, children: [jsxs('h2', { className: 'mb-3 font-medium', children: [status, ' · ', cards.length] }), !cards.length && small('Drop projects here'), ...cards.map(p => jsxs('article', { draggable: true, onDragStart: e => e.dataTransfer.setData('text/plain', p.id), className: `mb-3 rounded-lg border ${border} p-3`, children: [jsxs('div', { className: 'flex items-center justify-between gap-2', children: [jsx('button', { className: 'min-w-0 text-left font-medium', style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', overflowWrap: 'anywhere' }, onClick: () => go(p.id), children: jsxs('span', { children: [icon('folder'), ' ', p.name] }) }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] }), p.description && jsx('p', { className: `mt-2 text-sm ${muted}`, style: { display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }, children: p.description }), small(activity.data ? `${activity.data[p.id]?.length || 0} chats · ${timeAgo(last(p))}` : 'Loading activity…', 'mt-2'), jsx('select', { 'aria-label': `Move ${p.name} to`, className: 'mt-2 max-w-full bg-transparent text-xs', value: '', onChange: e => { if (e.target.value) void pins.update(p, { status: e.target.value }) }, children: [jsx('option', { value: '', disabled: true, children: 'Move to…' }), ...STATUSES.filter(s => s !== status).map(s => jsx('option', { value: s, children: s }, s))] })] }, p.id))] }, status)
     }) }) }),
     creating && jsx(CreateProject, { ctx, pins, close: () => setCreating(false), created: () => qc.invalidateQueries({ queryKey: ['project-home'] }) })
-  ] })
+  ] })] })
 }
 function ArchivedList({ projects, search, epoch, profile }) {
   const qc = useQueryClient()
@@ -205,6 +228,7 @@ function Project({ ctx, project: p, projects, pins, changePin, epoch, profile })
     try { await request('cron.manage', { action, name: job.job_id }); await cron.refetch() } catch (e) { setError(fail(e)) }
   }
   return jsxs('div', { className: 'h-full overflow-auto', children: [
+    jsx(UpdateBanner, {}),
     jsxs('div', { className: `flex items-center justify-between border-b ${border} px-8 py-4`, children: [jsxs('div', { className: 'flex items-center gap-2', children: [jsx('button', { onClick: () => go(), children: 'Projects' }), jsx('span', { className: muted, children: '/' }), jsx('select', { className: 'bg-transparent', style: { fieldSizing: 'content', maxWidth: '15rem' }, value: p.id, onChange: e => { if (e.target.value === '__rename') setDialog('rename'); else if (e.target.value === '__archive') setDialog('archive'); else if (e.target.value === '__restore') void restore(); else if (e.target.value === '__folder') void ctx.runAction('view.showFiles'); else go(e.target.value) }, children: [ ...menuProjects.map(x => jsx('option', { value: x.id, children: x.archived ? `${x.name} (archived)` : x.name }, x.id)), jsx('option', { value: '__rename', children: 'Rename…' }), jsx('option', { value: '__folder', children: 'Open file browser' }), p.archived ? jsx('option', { value: '__restore', children: 'Restore project' }) : jsx('option', { value: '__archive', children: 'Archive…' })] })] }), jsxs('div', { className: 'flex gap-2', children: [button(icon('search'), () => setSearchOpen(!searchOpen), { 'aria-label': 'Search recents' }), button(icon(pins.has(p.id) ? 'pinned' : 'pin'), () => changePin(p), { 'aria-label': pins.has(p.id) ? 'Unpin project' : 'Pin project' })] })] }),
     p.archived && jsxs('div', { role: 'status', className: `flex flex-wrap items-center justify-between gap-3 border-b ${border} px-8 py-3`, style: { background: 'var(--ui-bg-secondary)' }, children: [jsxs('span', { className: 'text-sm', children: [icon('archive'), ' This project is archived. It is hidden from the board and the project selector; its folder and chats are unchanged.'] }), jsxs('div', { className: 'flex gap-2', children: [button('View archive', () => go('', 'archived'), { variant: 'outline', size: 'sm' }), button(busy ? 'Restoring…' : 'Restore project', () => void restore(), { variant: 'default', size: 'sm', disabled: busy })] })] }),
     jsxs('div', { className: 'mx-auto max-w-6xl px-8 py-12', children: [jsxs('div', { className: 'mb-10', children: [jsx('h1', { className: 'text-4xl', style: { fontFamily: 'serif' }, children: p.name }), p.description && jsx('p', { className: `mt-2 ${muted}`, children: p.description })] }), jsx('style', { children: '.project-home-columns{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:48px}.project-home-columns>*{min-width:0;box-sizing:border-box}.project-home-columns textarea{width:100%;max-width:100%;box-sizing:border-box}@media(max-width:900px){.project-home-columns{grid-template-columns:minmax(0,1fr)}}' }), jsxs('div', { className: 'project-home-columns', children: [
@@ -413,7 +437,7 @@ function ComposerProjectPicker({ pins }) {
   return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), pending ? `${pending.name}…` : selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
 }
 export default {
-  id: 'project-home', name: 'Project Home', version: '0.6.1', defaultEnabled: false,
+  id: 'project-home', name: 'Project Home', version: VERSION, defaultEnabled: false,
   register(ctx) {
     let board = {}, disposers = [], listeners = new Set(), known = [], retired = false, generation = 0
     const storageKey = () => `pinned-projects:${host.state.connectionId?.get() || 'local'}:${host.state.profile.get() || 'default'}`
