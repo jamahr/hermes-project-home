@@ -413,7 +413,7 @@ function ComposerProjectPicker({ pins }) {
   return jsxs(DropdownMenu, { children: [jsx(DropdownMenuTrigger, { asChild: true, children: button(jsxs('span', { className: 'flex items-center gap-1', children: [icon('folder'), pending ? `${pending.name}…` : selected?.name || 'No project'] }), undefined, { 'aria-label': 'Choose project', className: 'h-7 px-2 text-xs' }) }), jsxs(DropdownMenuContent, { align: 'start', children: [...sorted.map(p => jsx(DropdownMenuItem, { onSelect: () => void move(p), children: p.name }, p.id)), jsx(DropdownMenuSeparator, {}), jsx(DropdownMenuItem, { onSelect: () => go(), children: 'Open Projects…' })] })] })
 }
 export default {
-  id: 'project-home', name: 'Project Home', version: '0.6.0', defaultEnabled: false,
+  id: 'project-home', name: 'Project Home', version: '0.6.1', defaultEnabled: false,
   register(ctx) {
     let board = {}, disposers = [], listeners = new Set(), known = [], retired = false, generation = 0
     const storageKey = () => `pinned-projects:${host.state.connectionId?.get() || 'local'}:${host.state.profile.get() || 'default'}`
@@ -433,9 +433,11 @@ export default {
     }
     function changePin(p) { void updateBoard(p, { pinned: !pins.has(p.id) }) }
     pins.update = updateBoard
-    function refreshPinned() {
+    let retryTimer = null
+    function refreshPinned(attempt = 0) {
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
       const current = ++generation, key = storageKey()
-      board = {}; sync([]); publish()
+      if (!attempt) { board = {}; sync([]); publish() }
       Promise.all([request('projects.list', {}), ctx.rest('/board')]).then(async ([result, saved]) => {
         if (retired || current !== generation) return
         known = (result.projects || []).filter(p => !p.archived); board = saved.projects || {}; publish()
@@ -449,16 +451,26 @@ export default {
           }
         }
         ctx.storage.remove(key)
-      }).catch(e => host.notify({ kind: 'error', message: `Project board: ${fail(e)}` }))
+      }).catch(e => {
+        if (retired || current !== generation) return
+        // At launch the gateway or tunnel is often still connecting. Never leave the board
+        // empty (every card falls back to To Do); keep retrying with backoff instead.
+        if (attempt < 8) { retryTimer = setTimeout(() => refreshPinned(attempt + 1), Math.min(30000, 1000 * 2 ** attempt)); return }
+        host.notify({ kind: 'error', message: `Couldn't load project columns: ${fail(e)}`, action: { label: 'Retry', onClick: () => refreshPinned() } })
+      })
     }
-    const stopProfile = host.state.profile.listen(refreshPinned)
-    const stopConnection = host.state.connectionId?.listen(refreshPinned) || (() => {})
+    pins.loaded = () => Object.keys(board).length > 0
+    const stopProfile = host.state.profile.listen(() => refreshPinned())
+    const stopConnection = host.state.connectionId?.listen(() => refreshPinned()) || (() => {})
     refreshPinned()
+    let lastEpoch = gatewayActivationEpoch()
+    const epochTimer = setInterval(() => { const e = gatewayActivationEpoch(); if (e !== lastEpoch) { lastEpoch = e; refreshPinned() } }, 2000)
+    ctx.onDispose(() => clearInterval(epochTimer))
     function Page() { const [, refresh] = useState(0); useEffect(() => { const fn = () => refresh(n => n + 1); listeners.add(fn); return () => listeners.delete(fn) }, []); return jsx(App, { ctx, pins, changePin }) }
     ctx.register({ id: 'composer-project', area: COMPOSER_AREAS.leading, render: () => jsx(ComposerProjectPicker, { pins }) })
     ctx.register({ id: 'page', area: ROUTES_AREA, data: { path: BASE }, render: () => jsx(Page, {}) })
     ctx.register({ id: 'nav', area: SIDEBAR_NAV_AREA, order: 100, data: { path: BASE, label: 'Projects', codicon: 'project' } })
     ctx.register({ id: 'open', area: PALETTE_AREA, data: { id: 'project-home.open', label: 'Open Projects', keywords: ['projects'], run: () => go() } })
-    ctx.onDispose(() => { retired = true; stopProfile(); stopConnection(); for (const dispose of disposers) dispose(); listeners.clear() })
+    ctx.onDispose(() => { retired = true; if (retryTimer) clearTimeout(retryTimer); stopProfile(); stopConnection(); for (const dispose of disposers) dispose(); listeners.clear() })
   }
 }

@@ -113,3 +113,19 @@ test('archived project page shows a banner and Restore instead of Archive', () =
   assert.match(text, /Restore project/)
   assert.doesNotMatch(text, /Archive…/)
 })
+
+test('board load retries instead of leaving every card in To Do', async () => {
+  let boardCalls = 0
+  const timers = []
+  const sdk = Object.fromEntries(sdkNames.map(n => [n, props => ({ type: n, props })]))
+  const state = { focusedStoredSessionId: atom(null), profile: atom('default'), cwd: atom(''), connectionId: atom('c') }
+  const host = { state, request: async () => ({ projects: [{ id: 'p_1', name: 'A' }] }), notify: noop, navigate: noop }
+  const sandbox = { ...sdk, COMPOSER_AREAS: { leading: 'l' }, ROUTES_AREA: 'r', SIDEBAR_NAV_AREA: 's', PALETTE_AREA: 'p', jsx, jsxs: jsx, host, useState: v => [v, noop], useEffect: noop, useRef: v => ({ current: v }), useQuery: () => ({}), useQueryClient: () => ({}), useValue: noop, gatewayActivationEpoch: () => 1, useGatewayActivationEpoch: () => 1, window: { location: { hash: '' }, addEventListener: noop, removeEventListener: noop }, setTimeout: (fn, ms) => { timers.push(fn); return timers.length }, clearTimeout: noop, setInterval: () => 0, clearInterval: noop, URLSearchParams, Promise, Date }
+  vm.createContext(sandbox)
+  vm.runInContext(source + '\nthis.plugin = plugin', sandbox)
+  const ctx = { register: () => noop, onDispose: noop, storage: { get: () => [], remove: noop }, rest: async () => { boardCalls++; if (boardCalls < 3) throw new Error('gateway not ready'); return { projects: { p_1: { status: 'Backlog' } } } } }
+  sandbox.plugin.register(ctx)
+  for (let i = 0; i < 5 && boardCalls < 3; i++) { await new Promise(r => setImmediate(r)); const fn = timers.shift(); if (fn) fn() }
+  await new Promise(r => setImmediate(r))
+  assert.equal(boardCalls, 3)
+})
